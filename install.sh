@@ -8,11 +8,11 @@
 set -eu
 
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-bin_dir="${XDG_BIN_HOME:-$HOME/.local/bin}"
-unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/homelab"
+bin_dir="$HOME/.local/bin"
+unit_dir="$HOME/.config/systemd/user"
+state_dir="$HOME/.local/state/homelab"
 plugin_id="io.github.wxxb789.homelab"
-plugin_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$plugin_id"
+plugin_dir="$HOME/.config/omarchy/plugins/$plugin_id"
 
 usage() {
   cat <<EOF
@@ -68,7 +68,10 @@ install_plugin() {
   fi
 
   source_dir=$(cd -- "$repo_dir" && pwd)
-  target_dir=$(cd -- "$plugin_dir" 2>/dev/null && pwd || true)
+  target_dir=""
+  if [[ -d $plugin_dir ]]; then
+    target_dir=$(cd -- "$plugin_dir" && pwd) || target_dir=""
+  fi
 
   if [[ $source_dir != "$target_dir" ]]; then
     if ! mkdir -p "$plugin_dir/plugin" ||
@@ -82,8 +85,9 @@ install_plugin() {
   # The running shell only learns about a new directory after a rescan, and
   # the rescan finishes asynchronously. Retry briefly: the first enable can
   # still answer "unknown" while the registry is catching up.
-  local attempt
-  for attempt in 1 2 3 4 5; do
+  local attempt=0
+  while (( attempt < 5 )); do
+    attempt=$((attempt + 1))
     "$omarchy_bin" shell shell rescanPlugins >/dev/null 2>&1 || true
     "$omarchy_bin" plugin enable "$plugin_id" --section right >/dev/null 2>&1 || true
     if "$omarchy_bin" plugin list --json 2>/dev/null |
@@ -101,12 +105,26 @@ install_plugin() {
   fi
 }
 
+refuse_root() {
+  if (( EUID == 0 )); then
+    echo "error: run install.sh as your desktop user, not with sudo or as root." >&2
+    exit 1
+  fi
+}
+
 uninstall() {
+  refuse_root
+  # Stop the watcher first: its ExecStopPost restores DPMS while Hyprland is
+  # still alive. Then release the inhibitor, which may suspend a closed lid.
+  systemctl --user disable --now homelab-lid.service >/dev/null 2>&1 || true
+
   if [[ -f $state_dir/lid-blanked ]]; then
-    hyprctl dispatch 'hl.dsp.dpms({ action = "on" })' >/dev/null 2>&1 || true
+    "$bin_dir/homelab-lid-watch" --restore >/dev/null 2>&1 || true
   fi
 
-  systemctl --user disable --now homelab-lid.service >/dev/null 2>&1 || true
+  if omarchy-hw-laptop-closed >/dev/null 2>&1; then
+    echo "warning: the lid is closed; releasing the inhibitor may suspend the machine." >&2
+  fi
   systemctl --user disable --now homelab-inhibit.service >/dev/null 2>&1 || true
 
   if command -v omarchy >/dev/null 2>&1; then
@@ -116,7 +134,7 @@ uninstall() {
 
   rm -f "$bin_dir/homelab" "$bin_dir/homelab-lid-watch"
   rm -f "$unit_dir/homelab-lid.service" "$unit_dir/homelab-inhibit.service"
-  rm -f "$state_dir/enabled" "$state_dir/lid-blanked"
+  rm -f "$state_dir/enabled" "$state_dir/lid-blanked" "$state_dir/lock"
 
   systemctl --user daemon-reload
 
@@ -140,7 +158,8 @@ case "${1:-install}" in
     ;;
 esac
 
-require hyprctl jq systemctl loginctl omarchy-hw-laptop-closed omarchy-hyprland-monitor-laptop
+refuse_root
+require hyprctl jq systemctl loginctl flock timeout omarchy-hw-laptop omarchy-hw-laptop-closed omarchy-hyprland-monitor-laptop
 
 chmod +x "$repo_dir/bin/homelab" "$repo_dir/bin/homelab-lid-watch"
 

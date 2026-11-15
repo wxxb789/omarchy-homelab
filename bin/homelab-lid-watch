@@ -5,10 +5,18 @@
 
 set -u
 
-state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/homelab"
+state_dir="$HOME/.local/state/homelab"
 mode_flag="$state_dir/enabled"
 blanked_flag="$state_dir/lid-blanked"
 mkdir -p "$state_dir"
+
+log() {
+  printf 'homelab-lid: %s\n' "$*" >&2
+}
+
+valid_monitor() {
+  [[ $1 =~ ^[A-Za-z0-9._-]+$ ]]
+}
 
 # Read the ACPI lid directly when it exists (cheap, no subprocess), and fall
 # back to Omarchy's helper for machines that report the lid elsewhere.
@@ -22,7 +30,7 @@ lid_closed() {
   done
   (( found )) && return 1
 
-  omarchy-hw-laptop-closed >/dev/null 2>&1
+  timeout 3 omarchy-hw-laptop-closed >/dev/null 2>&1
 }
 
 # Talk to whichever Hyprland instance is current. A user service started at
@@ -32,17 +40,69 @@ hypr() {
   local sig
 
   if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] &&
-    HYPRLAND_INSTANCE_SIGNATURE=$HYPRLAND_INSTANCE_SIGNATURE hyprctl "$@" 2>/dev/null; then
+    HYPRLAND_INSTANCE_SIGNATURE=$HYPRLAND_INSTANCE_SIGNATURE timeout 2 hyprctl "$@" 2>/dev/null; then
     return 0
   fi
 
   for sig in "${XDG_RUNTIME_DIR:-/run/user/$UID}"/hypr/*; do
     [[ -S $sig/.socket.sock ]] || continue
-    HYPRLAND_INSTANCE_SIGNATURE=${sig##*/} hyprctl "$@" 2>/dev/null && return 0
+    HYPRLAND_INSTANCE_SIGNATURE=${sig##*/} timeout 2 hyprctl "$@" 2>/dev/null && return 0
   done
 
   return 1
 }
+
+resolve_internal() {
+  local internal
+  internal=$(timeout 3 omarchy-hyprland-monitor-laptop 2>/dev/null || true)
+  valid_monitor "$internal" || return 1
+  printf '%s\n' "$internal"
+}
+
+# Restore the panel without relying on the lid being open. Used by the unit's
+# ExecStopPost and by `homelab off`, so stopping the watcher cannot leave the
+# internal panel blanked.
+restore_panel() {
+  [[ -f $blanked_flag ]] || return 0
+
+  local internal monitors
+  internal=$(resolve_internal) || {
+    log "restore skipped: no safe internal output"
+    return 1
+  }
+
+  monitors=$(hypr monitors all -j) || {
+    log "restore skipped: Hyprland did not answer"
+    return 1
+  }
+
+  if ! jq -e . <<<"$monitors" >/dev/null 2>&1; then
+    log "restore skipped: invalid monitor JSON"
+    return 1
+  fi
+
+  # An output disabled by clamshell has no panel to restore. Drop the stale
+  # flag so a later lid open does not keep trying.
+  if ! jq -e --arg m "$internal" \
+    'any(.[]; .name == $m and .disabled == false)' <<<"$monitors" >/dev/null 2>&1; then
+    rm -f "$blanked_flag"
+    return 0
+  fi
+
+  if hypr dispatch "hl.dsp.dpms({ action = \"on\", monitor = \"$internal\" })" >/dev/null 2>&1; then
+    rm -f "$blanked_flag"
+    log "restored internal panel ($internal)"
+    return 0
+  fi
+
+  log "restore failed for $internal"
+  return 1
+}
+
+if [[ ${1:-} == --restore ]]; then
+  restore_panel
+  exit $?
+fi
 
 internal=""
 ticks=0
@@ -54,7 +114,7 @@ while :; do
   # Re-resolve periodically in case the internal output appears later or
   # Hyprland restarted with a new instance signature.
   if [[ -z $internal ]] || (( ticks % 30 == 0 )); then
-    internal=$(omarchy-hyprland-monitor-laptop 2>/dev/null || true)
+    internal=$(resolve_internal || true)
   fi
   [[ -n $internal ]] || continue
 
@@ -71,6 +131,9 @@ while :; do
       if hypr monitors all -j | jq -e --arg m "$internal" \
         'any(.[]; .name == $m and .disabled == false)' >/dev/null 2>&1; then
         if hypr dispatch "hl.dsp.dpms({ action = \"off\", monitor = \"$internal\" })" >/dev/null 2>&1; then
+          if [[ ! -f $blanked_flag ]]; then
+            log "blanked internal panel ($internal)"
+          fi
           : >"$blanked_flag"
         fi
       fi
@@ -78,10 +141,6 @@ while :; do
   else
     # Restore the panel even if the mode was switched off while the lid was
     # closed, so the next lid open always gives a working screen.
-    if [[ -f $blanked_flag ]]; then
-      if hypr dispatch "hl.dsp.dpms({ action = \"on\", monitor = \"$internal\" })" >/dev/null 2>&1; then
-        rm -f "$blanked_flag"
-      fi
-    fi
+    restore_panel || true
   fi
 done
