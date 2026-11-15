@@ -38,7 +38,7 @@ homelab on --for 2h              # ...and turn off after two hours
 homelab on --until 23:00         # ...and turn off at 23:00 (tomorrow if past)
 homelab off       # Laptop mode: suspend on lid close
 homelab toggle    # Switch modes
-homelab status    # Show mode, lid, inhibitor, display, power, deadline, boot
+homelab status    # Show mode, lid, inhibitor, display, power, deadline, guard
 homelab status --json --strict  # machine-readable, fail on inconsistency
 homelab doctor    # Diagnose dependencies, units, lock, panel, power, state
 ```
@@ -48,9 +48,9 @@ also accepts `laptop`.
 
 `homelab status --json` prints a machine-readable snapshot (`schemaVersion: 1`)
 with the mode, lid, verified inhibitor lock, watcher, boot state, panel state,
-power/battery/temperature, deadline, problems, and warnings. Add `--strict` to
-exit 1 when the mode is inconsistent; plain `status` stays useful to humans and
-exits 0.
+power/battery/temperature, deadline, guard, problems, and warnings. Add
+`--strict` to exit 1 when the mode is inconsistent; plain `status` stays useful
+to humans and exits 0.
 
 The deadline is stored in the state directory and enforced by a user service,
 so a timed hold keeps counting across a reboot when systemd lingering is
@@ -60,6 +60,11 @@ enabled. A new `homelab on` without `--for`/`--until` clears any old deadline.
 below 20%, and when the CPU is at or above 90°C. `homelab status` shows AC or
 battery, charge, charge state, and the hottest thermal zone; `status --json`
 exposes the same data under `power`.
+
+A safety guard timer runs every minute while HomeLab mode is on. It turns the
+mode off automatically at **10% battery or less while unplugged**, or at
+**95°C or higher**, and sends a notification. It is a last resort, not a
+replacement for UPower's critical-battery action.
 
 ## Bar icon
 
@@ -135,8 +140,9 @@ airflow.
   reach critical while you are not looking.
 - Use it for timed jobs, not as a permanent server. Prefer
   `homelab on --for 2h` over an open-ended hold, and check the temperature.
-- Do not rely on HomeLab mode to keep the machine alive at critical battery;
-  logind, UPower, or firmware may suspend, hibernate, or power off.
+- The safety guard turns the mode off at 10% battery (unplugged) or 95°C.
+  Do not rely on it as the only protection; logind, UPower, or firmware may
+  suspend, hibernate, or power off first.
 - Never run it closed in a bag, backpack, or other enclosed space.
 
 ## Notes

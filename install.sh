@@ -128,6 +128,7 @@ uninstall() {
   refuse_root
   # Stop the watcher first: its ExecStopPost restores DPMS while Hyprland is
   # still alive. Then release the inhibitor, which may suspend a closed lid.
+  timeout 30 systemctl --user disable --now homelab-guard.timer >/dev/null 2>&1 || true
   timeout 30 systemctl --user disable --now homelab-deadline.service >/dev/null 2>&1 || true
   timeout 30 systemctl --user disable --now homelab-lid.service >/dev/null 2>&1 || true
 
@@ -156,6 +157,8 @@ uninstall() {
   remove_link "$unit_dir/homelab-lid.service"
   remove_link "$unit_dir/homelab-inhibit.service"
   remove_link "$unit_dir/homelab-deadline.service"
+  remove_link "$unit_dir/homelab-guard.service"
+  remove_link "$unit_dir/homelab-guard.timer"
   rm -f "$state_dir/enabled" "$state_dir/lid-blanked" "$state_dir/deadline" "$state_dir/lock"
 
   timeout 20 systemctl --user daemon-reload
@@ -191,13 +194,18 @@ link "$repo_dir/bin/homelab-deadline" "$bin_dir/homelab-deadline"
 link "$repo_dir/systemd/user/homelab-inhibit.service" "$unit_dir/homelab-inhibit.service"
 link "$repo_dir/systemd/user/homelab-lid.service" "$unit_dir/homelab-lid.service"
 link "$repo_dir/systemd/user/homelab-deadline.service" "$unit_dir/homelab-deadline.service"
+link "$repo_dir/systemd/user/homelab-guard.service" "$unit_dir/homelab-guard.service"
+link "$repo_dir/systemd/user/homelab-guard.timer" "$unit_dir/homelab-guard.timer"
 
 mkdir -p "$state_dir"
 
 timeout 20 systemctl --user daemon-reload
-if ! timeout 20 systemctl --user enable homelab-inhibit.service homelab-lid.service homelab-deadline.service; then
+if ! timeout 20 systemctl --user enable homelab-inhibit.service homelab-lid.service homelab-deadline.service homelab-guard.timer; then
   echo "warning: could not enable the HomeLab user units." >&2
 fi
+timeout 20 systemctl --user start homelab-guard.timer >/dev/null 2>&1 || {
+  echo "warning: could not start the HomeLab safety guard timer." >&2
+}
 timeout 20 systemctl --user reset-failed homelab-lid.service homelab-inhibit.service homelab-deadline.service >/dev/null 2>&1 || true
 if [[ -f $state_dir/enabled ]]; then
   if ! timeout 20 systemctl --user start homelab-lid.service; then

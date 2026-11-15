@@ -12,6 +12,8 @@ new_sandbox
 inhibit="$repo_dir/systemd/user/homelab-inhibit.service"
 lid="$repo_dir/systemd/user/homelab-lid.service"
 deadline="$repo_dir/systemd/user/homelab-deadline.service"
+guard="$repo_dir/systemd/user/homelab-guard.service"
+guard_timer="$repo_dir/systemd/user/homelab-guard.timer"
 
 # State follows XDG_STATE_HOME, which systemd expands as %S. The mode flag is
 # the only condition; there is no Wayland-session environment gate anymore.
@@ -85,3 +87,22 @@ assert_contains "$deadline" 'ReadWritePaths=%S/homelab' \
   "the deadline service may write the state directory"
 assert_contains "$deadline" 'TimeoutStopSec=5' \
   "the deadline service has a bounded stop timeout"
+
+assert_contains "$guard" 'ConditionPathExists=%S/homelab/enabled' \
+  "the guard runs only in HomeLab mode"
+assert_contains "$guard" 'ExecStart=%h/.local/bin/homelab guard-check' \
+  "the guard runs the CLI check"
+assert_contains "$guard" 'Type=oneshot' \
+  "the guard is a one-shot service"
+assert_contains "$guard" 'StateDirectory=homelab' \
+  "the guard owns the private state directory"
+assert_contains "$guard" 'ReadWritePaths=%S/homelab' \
+  "the guard may write the state directory"
+assert_contains "$guard_timer" 'ConditionPathExists=%S/homelab/enabled' \
+  "the guard timer runs only in HomeLab mode"
+assert_contains "$guard_timer" 'OnBootSec=1min' \
+  "the guard runs after boot"
+assert_contains "$guard_timer" 'OnUnitActiveSec=1min' \
+  "the guard runs every minute"
+assert_contains "$guard_timer" 'WantedBy=timers.target' \
+  "the guard timer is enabled with timers.target"

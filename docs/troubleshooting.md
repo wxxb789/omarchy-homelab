@@ -413,6 +413,26 @@ Set it for the user manager as well, or unset it so both sides use
 symlinks; otherwise the old copies can linger. Run `./install.sh --uninstall`
 with the same `XDG_CONFIG_HOME` and `XDG_STATE_HOME` values you installed with.
 
+## Safety guard did not fire
+
+The guard is a minute timer, not a daemon:
+
+```bash
+systemctl --user status homelab-guard.timer --no-pager
+systemctl --user list-timers homelab-guard.timer --no-pager
+journalctl --user -u homelab-guard -n 50 --no-pager
+```
+
+It runs only while the mode flag exists and only turns the mode off when:
+
+- AC is disconnected and the battery is at or below 10%, or
+- the hottest thermal zone is at or above 95°C.
+
+Check the raw values with `homelab status` or `homelab status --json | jq .power`.
+If the timer is inactive, run `./install.sh` again as the desktop user. Do not
+rely on the guard instead of UPower's critical-battery action; either may win
+the race.
+
 ## Uninstall and verify
 
 Open the lid first. Releasing the inhibitor with a closed lid can suspend the
