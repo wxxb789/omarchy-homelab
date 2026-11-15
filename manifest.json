@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.wxxb789.homelab",
   "name": "HomeLab",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "wxxb789",
   "license": "MIT",
   "description": "Keep an Omarchy laptop running with the lid closed: a bar toggle, a logind inhibitor, and internal-panel blanking.",

@@ -5,12 +5,12 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 
-// Bar toggle for HomeLab mode.
+// Bar toggle and control panel for HomeLab mode.
 //
-// The CLI and the systemd units own the actual state; this widget reads the
-// mode flag for an instant toggle and polls `homelab status --json` while the
-// mode is on so the tooltip can report the verified lock, deadline, power, and
-// temperature instead of only the user's intent.
+// The CLI and the systemd units own the state. The icon reads the mode flag
+// for an instant toggle and polls `homelab status --json` while the mode or
+// panel is open so the tooltip and panel can show the verified lock, deadline,
+// power, and temperature.
 BarWidget {
   id: root
   moduleName: "io.github.wxxb789.homelab"
@@ -21,16 +21,23 @@ BarWidget {
     return xdg && xdg.length > 0 ? xdg : Quickshell.env("HOME") + "/.local/state"
   }
   readonly property string flagPath: stateHome + "/homelab/enabled"
+  readonly property color foreground: root.bar ? root.bar.foreground : Commons.Color.foreground
+  readonly property string fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
 
   property bool modeOn: false
   property bool busy: false
   property bool failed: false
   property bool installed: true
+  property bool popupOpen: false
   property var health: null
   property bool healthWarning: false
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
+
+  function close() {
+    popupOpen = false
+  }
 
   // The flag is the mode's single source of truth. Watching it means a
   // `homelab on/off` from anywhere updates the bar without polling.
@@ -51,6 +58,15 @@ BarWidget {
     } else {
       root.health = null
       root.healthWarning = false
+      if (root.popupOpen) Qt.callLater(root.refreshStatus)
+    }
+  }
+
+  onPopupOpenChanged: {
+    if (root.popupOpen) {
+      probe.running = true
+      modeFlag.reload()
+      Qt.callLater(root.refreshStatus)
     }
   }
 
@@ -61,8 +77,8 @@ BarWidget {
   }
 
   Process {
-    id: toggleProc
-    command: [root.homelabBin, "toggle"]
+    id: actionProc
+    command: [root.homelabBin, "status"]
     onExited: function(exitCode) {
       root.busy = false
       root.failed = exitCode !== 0
@@ -90,13 +106,11 @@ BarWidget {
 
   Timer {
     id: busyTimeout
-    // A mode change can wait on a 20-second systemd call. Do not declare
-    // failure while the CLI is still inside that window.
     interval: 20000
     onTriggered: {
       root.busy = false
-      if (toggleProc.running) {
-        toggleProc.running = false
+      if (actionProc.running) {
+        actionProc.running = false
         root.failed = true
       }
     }
@@ -106,16 +120,22 @@ BarWidget {
     id: healthTimer
     interval: 15000
     repeat: true
-    running: root.modeOn && root.installed
+    running: (root.modeOn || root.popupOpen) && root.installed
     onTriggered: root.refreshStatus()
   }
 
   function toggle() {
-    if (toggleProc.running || !root.installed) return
+    runAction(["toggle"])
+  }
+
+  function runAction(args) {
+    if (actionProc.running || !root.installed) return
     root.busy = true
     root.failed = false
     busyTimeout.restart()
-    toggleProc.running = true
+    actionProc.command = [root.homelabBin].concat(args)
+    actionProc.running = true
+    root.popupOpen = false
   }
 
   function refresh() {
@@ -125,7 +145,7 @@ BarWidget {
   }
 
   function refreshStatus() {
-    if (!root.installed || !root.modeOn || statusProc.running) return
+    if (!root.installed || (!root.modeOn && !root.popupOpen) || statusProc.running) return
     statusProc.running = true
   }
 
@@ -157,7 +177,7 @@ BarWidget {
     var power = root.health.power
     if (power) {
       if (power.ac === false) {
-        var battery = power.batteryPercent === null || power.batteryPercent === undefined
+        const battery = power.batteryPercent === null || power.batteryPercent === undefined
           ? "" : " " + power.batteryPercent + "%"
         parts.push("on battery" + battery)
       }
@@ -172,6 +192,21 @@ BarWidget {
     return parts.join(" · ")
   }
 
+  function panelStatusText() {
+    if (!root.health) return root.modeOn ? "Fetching status…" : "Choose a timed hold or enable open-ended."
+    var parts = []
+    parts.push(root.health.inhibitor && root.health.inhibitor.lockHeld ? "lock verified" : "lock not held")
+    parts.push(root.health.watcher && root.health.watcher.active ? "watcher active" : "watcher inactive")
+    if (root.health.deadline) parts.push("until " + root.health.deadline.iso)
+    if (root.health.power) {
+      if (root.health.power.ac === false) parts.push("on battery")
+      if (root.health.power.temperatureC !== null && root.health.power.temperatureC !== undefined)
+        parts.push(root.health.power.temperatureC + "°C")
+    }
+    if (root.health.consistent === false) parts.push("STATE INCONSISTENT")
+    return parts.join(" · ")
+  }
+
   Component.onCompleted: {
     probe.running = true
     if (root.modeOn) Qt.callLater(root.refreshStatus)
@@ -183,13 +218,14 @@ BarWidget {
     target: root.moduleName
     function toggle(): void { root.toggle() }
     function refresh(): void { root.refresh() }
+    function openPanel(): void { root.popupOpen = true }
+    function closePanel(): void { root.popupOpen = false }
   }
 
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // A server while HomeLab is on, the laptop it becomes when off.
     text: root.modeOn ? "󰒋" : "󰌢"
     active: root.modeOn
     activeColor: root.healthWarning ? Commons.Color.urgent : (root.bar ? root.bar.urgent : Commons.Color.accent)
@@ -198,15 +234,137 @@ BarWidget {
     interactive: true
     tooltipText: {
       if (!root.installed) return "HomeLab: CLI not installed — run install.sh"
-      if (root.failed) return "HomeLab: toggle failed — run homelab status"
+      if (root.failed) return "HomeLab: action failed — run homelab status"
       if (root.busy) return "HomeLab: switching…"
-      if (!root.modeOn) return "HomeLab mode: off — click to keep running with the lid closed"
+      if (!root.modeOn) return "HomeLab mode: off — click for controls, right-click to toggle"
       var extra = root.healthText()
-      return "HomeLab mode: on — lid close keeps the machine running" +
+      return "HomeLab mode: on — click for controls, right-click to toggle" +
         (extra ? " · " + extra : "")
     }
     onPressed: function(button) {
-      if (button === Qt.LeftButton) root.toggle()
+      if (button === Qt.RightButton) root.toggle()
+      else if (button === Qt.LeftButton) root.popupOpen = !root.popupOpen
+    }
+  }
+
+  PopupCard {
+    id: popup
+    anchorItem: button
+    bar: root.bar
+    owner: root
+    open: root.popupOpen
+    contentWidth: popup.fittedContentWidth(Style.space(360))
+    contentHeight: popup.fittedContentHeight(column.implicitHeight)
+
+    Column {
+      id: column
+      anchors.fill: parent
+      spacing: Style.space(10)
+
+      Text {
+        width: parent.width
+        textFormat: Text.PlainText
+        text: root.modeOn ? "HomeLab ON" : "HomeLab OFF"
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.title
+        font.bold: true
+      }
+
+      Text {
+        width: parent.width
+        textFormat: Text.PlainText
+        text: root.panelStatusText()
+        color: Qt.darker(root.foreground, 1.4)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        wrapMode: Text.WordWrap
+      }
+
+      PanelSeparator {
+        width: parent.width
+        foreground: root.foreground
+      }
+
+      Text {
+        width: parent.width
+        textFormat: Text.PlainText
+        text: "Timed hold"
+        color: Qt.darker(root.foreground, 1.4)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: true
+        font.letterSpacing: 1.0
+      }
+
+      Row {
+        id: presets
+        width: parent.width
+        spacing: Style.space(6)
+
+        readonly property real cellWidth: (width - spacing * 2) / 3
+
+        Button {
+          width: presets.cellWidth
+          text: "1h"
+          bordered: true
+          fontSize: Style.font.bodySmall
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.runAction(["on", "--for", "1h"])
+        }
+        Button {
+          width: presets.cellWidth
+          text: "3h"
+          bordered: true
+          fontSize: Style.font.bodySmall
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.runAction(["on", "--for", "3h"])
+        }
+        Button {
+          width: presets.cellWidth
+          text: "8h"
+          bordered: true
+          fontSize: Style.font.bodySmall
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.runAction(["on", "--for", "8h"])
+        }
+      }
+
+      Row {
+        width: parent.width
+        spacing: Style.space(6)
+
+        Button {
+          width: (parent.width - parent.spacing) / 2
+          text: "Open-ended"
+          bordered: true
+          fontSize: Style.font.bodySmall
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.runAction(["on"])
+        }
+        Button {
+          width: (parent.width - parent.spacing) / 2
+          text: root.modeOn ? "Turn off" : "Turn on"
+          bordered: true
+          fontSize: Style.font.bodySmall
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.runAction([root.modeOn ? "off" : "on"])
+        }
+      }
+
+      Text {
+        width: parent.width
+        textFormat: Text.PlainText
+        text: "Right-click the icon to toggle quickly"
+        color: Qt.darker(root.foreground, 1.6)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
     }
   }
 }
