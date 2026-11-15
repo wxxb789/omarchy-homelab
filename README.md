@@ -77,6 +77,9 @@ If the icon is missing after an install, run `omarchy restart shell` once.
   binding still locks the session and applies clamshell handling when an
   external monitor is attached. That is why opening the lid shows the lock
   screen; unlock as usual and everything is there.
+- **Both user units run sandboxed:** no new privileges, a read-only home
+  except the state directory, no Internet sockets, and a reduced system-call
+  surface. The watcher only needs the Hyprland socket and the local system bus.
 - **Manual suspend still works.** HomeLab mode only inhibits the lid switch, not
   `sleep`, so choosing Suspend from the power menu still suspends the machine.
 
