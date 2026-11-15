@@ -21,8 +21,10 @@ cd ~/repos/omarchy-homelab
 ```
 
 `install.sh` symlinks the commands and units from the checkout into
-`~/.local/bin` and `~/.config/systemd/user`, then enables the user units. The
-checkout stays the source of truth, so editing a file here changes what the
+`~/.local/bin` and `~/.config/systemd/user`, then enables the user units. It
+also installs an Omarchy bar widget under `~/.config/omarchy/plugins` and
+enables it on the right side of the bar. The checkout stays the source of
+truth for the commands and units, so editing a file here changes what the
 machine runs. Laptop mode remains the default.
 
 Requirements: Omarchy (Hyprland), `jq`, and systemd. No root is needed.
@@ -38,6 +40,23 @@ homelab status    # Show mode, lid state, inhibitor, display, boot persistence
 
 `homelab on` also accepts `homelab` and `server` as the mode name; `homelab off`
 also accepts `laptop`.
+
+## Bar icon
+
+The installer adds a **HomeLab** widget to the Omarchy bar. It shows a dim
+laptop in Laptop mode and a lit server rack in HomeLab mode. Left-click
+toggles the mode; hover shows what a click will do. The widget watches the same
+mode flag as the CLI, so `homelab on/off` from a terminal, SSH, or a keybinding
+updates the bar immediately.
+
+The widget is also scriptable through Omarchy's shell IPC:
+
+```bash
+omarchy-shell io.github.wxxb789.homelab toggle
+omarchy-shell io.github.wxxb789.homelab refresh
+```
+
+If the icon is missing after an install, run `omarchy restart shell` once.
 
 ## How it works
 
@@ -81,14 +100,17 @@ also accepts `laptop`.
 ./install.sh --uninstall
 ```
 
-This stops and disables the units, removes the symlinks, clears the mode flag,
-and returns the machine to Laptop mode. The checkout is not touched.
+This stops and disables the units, removes the symlinks and the bar widget,
+clears the mode flag, and returns the machine to Laptop mode. The checkout is
+not touched.
 
 ## Layout
 
 ```
 bin/homelab               mode switch and status
 bin/homelab-lid-watch     lid watcher / DPMS handling
+manifest.json             Omarchy bar-widget manifest
+plugin/BarWidget.qml      bar toggle and mode indicator
 systemd/user/             user units
 install.sh                symlink + enable helper
 ```

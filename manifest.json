@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.wxxb789.homelab",
+  "name": "HomeLab",
+  "version": "0.1.0",
+  "author": "wxxb789",
+  "description": "Keep an Omarchy laptop running with the lid closed: a bar toggle, a logind inhibitor, and internal-panel blanking.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "plugin/BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "HomeLab",
+    "description": "Toggle lid-closed HomeLab mode. Closing the lid keeps the machine running, blanks the internal panel, and leaves Omarchy's lock and clamshell handling in place.",
+    "category": "System",
+    "aliases": [
+      "homelab",
+      "lid",
+      "lid hold",
+      "server",
+      "clamshell",
+      "suspend"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
