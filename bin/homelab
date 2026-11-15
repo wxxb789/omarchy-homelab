@@ -517,6 +517,7 @@ collect_state() {
   state_deadline_label=""
   state_deadline_remaining=0
   state_deadline_active=0
+  state_deadline_enabled=0
   state_mode="laptop"
   state_boot="laptop"
   state_problems=()
@@ -574,6 +575,7 @@ collect_state() {
     [[ $state_deadline_epoch =~ ^[0-9]+$ ]] || state_deadline_epoch=""
   fi
   sc is-active --quiet "$deadline_unit" && state_deadline_active=1
+  sc is-enabled --quiet "$deadline_unit" 2>/dev/null && state_deadline_enabled=1
   if [[ -n $state_deadline_epoch ]]; then
     now=$(date +%s)
     state_deadline_remaining=$((state_deadline_epoch - now))
@@ -760,6 +762,7 @@ status_json() {
     --arg deadlineLabel "$state_deadline_label" \
     --argjson deadlineRemaining "$state_deadline_remaining" \
     --argjson deadlineActive "$state_deadline_active" \
+    --argjson deadlineEnabled "$state_deadline_enabled" \
     --arg ac "$state_ac" \
     --arg battery "$state_battery" \
     --arg batteryStatus "$state_battery_status" \
@@ -796,7 +799,8 @@ status_json() {
         epoch: ($deadlineEpoch | tonumber),
         iso: $deadlineLabel,
         remainingSeconds: $deadlineRemaining,
-        active: ($deadlineActive == 1)
+        active: ($deadlineActive == 1),
+        enabled: ($deadlineEnabled == 1)
       } end),
       power: {
         ac: (if $ac == "yes" then true elif $ac == "no" then false else null end),
@@ -837,6 +841,144 @@ cmd_status() {
   return 0
 }
 
+doctor_check_cmd() {
+  local cmd="$1" optional="${2:-}"
+
+  if command -v "$cmd" >/dev/null 2>&1; then
+    printf '[ok]   command: %s\n' "$cmd"
+  elif [[ $optional == optional ]]; then
+    printf '[warn] command: %s (not installed)\n' "$cmd"
+  else
+    printf '[fail] command: %s (missing)\n' "$cmd"
+    doctor_fail=1
+  fi
+}
+
+cmd_doctor() {
+  local cmd problem warning power_text
+
+  (( $# == 0 )) || {
+    echo "homelab: doctor takes no options." >&2
+    return 2
+  }
+
+  doctor_fail=0
+  printf '== Dependencies ==\n'
+  for cmd in hyprctl jq systemctl systemd-inhibit loginctl flock timeout \
+    omarchy-hw-laptop omarchy-hw-laptop-closed omarchy-hyprland-monitor-laptop; do
+    doctor_check_cmd "$cmd"
+  done
+  doctor_check_cmd omarchy-power-present optional
+
+  printf '\n== Hardware ==\n'
+  if is_laptop; then
+    printf '[ok]   laptop lid detected\n'
+  else
+    printf '[fail] no laptop lid detected\n'
+    doctor_fail=1
+  fi
+
+  collect_state
+
+  printf '\n== Mode ==\n'
+  if (( state_flag )); then
+    if (( state_inhibited )); then
+      if (( state_lock_held )); then
+        printf '[ok]   lid inhibitor active; handle-lid-switch lock verified\n'
+      else
+        printf '[fail] inhibitor unit active but no handle-lid-switch lock\n'
+        doctor_fail=1
+      fi
+    else
+      printf '[fail] mode flag set but lid inhibitor inactive\n'
+      doctor_fail=1
+    fi
+
+    if (( state_watcher )); then
+      printf '[ok]   lid watcher active\n'
+    elif (( state_hypr )); then
+      printf '[fail] lid watcher inactive while Hyprland is reachable\n'
+      doctor_fail=1
+    else
+      printf '[warn] lid watcher inactive; Hyprland not reachable\n'
+    fi
+
+    if [[ -n $state_deadline_epoch ]]; then
+      if (( state_deadline_active )); then
+        printf '[ok]   deadline %s (%s left)\n' \
+          "$state_deadline_label" "$(format_remaining "$state_deadline_remaining")"
+      else
+        printf '[fail] deadline set but deadline service inactive\n'
+        doctor_fail=1
+      fi
+    else
+      printf '[ok]   no deadline (open-ended hold)\n'
+    fi
+  else
+    printf '[ok]   Laptop mode (inhibitor inactive)\n'
+  fi
+
+  printf '\n== Boot ==\n'
+  if [[ $state_linger == yes ]]; then
+    printf '[ok]   linger enabled; mode can start before login\n'
+  else
+    printf '[warn] linger %s; mode starts after login only\n' "$state_linger"
+  fi
+  if (( state_flag )) && ! (( state_enabled )); then
+    printf '[warn] inhibitor unit is not enabled\n'
+  fi
+  if (( state_flag )) && ! (( state_lid_enabled )); then
+    printf '[warn] lid watcher unit is not enabled\n'
+  fi
+  if (( state_flag )) && [[ -n $state_deadline_epoch ]] && ! (( state_deadline_enabled )); then
+    printf '[warn] deadline unit is not enabled\n'
+  fi
+
+  printf '\n== Panel ==\n'
+  if [[ -z $state_internal ]]; then
+    printf '[warn] internal output not detected\n'
+  else
+    printf '[ok]   %s: %s, DPMS %s\n' \
+      "$state_internal" "$state_internal_state" "$state_dpms"
+  fi
+  if (( state_blanked )); then
+    if [[ -n $state_blanked_monitor ]]; then
+      printf '[ok]   blank marker: %s\n' "$state_blanked_monitor"
+    else
+      printf '[warn] blank marker exists without a monitor name\n'
+    fi
+  fi
+
+  printf '\n== Power ==\n'
+  case "$state_ac" in
+    yes) power_text="AC" ;;
+    no) power_text="battery" ;;
+    *) power_text="power unknown" ;;
+  esac
+  [[ -n $state_battery ]] && power_text+=", ${state_battery}%"
+  [[ -n $state_battery_status ]] && power_text+=", ${state_battery_status}"
+  [[ -n $state_temp ]] && power_text+=", ${state_temp}C"
+  printf '[ok]   %s\n' "$power_text"
+
+  printf '\n== State ==\n'
+  if (( ${#state_problems[@]} == 0 )); then
+    printf '[ok]   consistent\n'
+  else
+    for problem in "${state_problems[@]}"; do
+      printf '[fail] %s\n' "$problem"
+      doctor_fail=1
+    done
+  fi
+  for warning in "${state_warnings[@]}"; do
+    printf '[warn] %s\n' "$warning"
+  done
+
+  if (( doctor_fail )); then
+    return 1
+  fi
+  return 0
+}
+
 case "${1:-status}" in
   on|homelab|server)
     shift
@@ -854,9 +996,13 @@ case "${1:-status}" in
     shift
     cmd_status "$@"
     ;;
+  doctor)
+    shift
+    cmd_doctor "$@"
+    ;;
   -h|--help|help)
     cat <<'EOF'
-Usage: homelab [on|off|toggle|status]
+Usage: homelab [on|off|toggle|status|doctor]
 
   on, homelab   HomeLab mode: keep running with the lid closed
   off, laptop   Laptop mode: suspend on lid close
@@ -864,11 +1010,12 @@ Usage: homelab [on|off|toggle|status]
   status        Show the current mode and lid/display state
   status --json Machine-readable state for scripts and the bar
   status --strict Exit 1 if the mode is inconsistent
+  doctor        Diagnose dependencies, units, lock, panel, power, and state
 EOF
     ;;
   *)
     cat <<'EOF'
-Usage: homelab [on|off|toggle|status]
+Usage: homelab [on|off|toggle|status|doctor]
 
   on, homelab   HomeLab mode: keep running with the lid closed
   off, laptop   Laptop mode: suspend on lid close
@@ -876,6 +1023,7 @@ Usage: homelab [on|off|toggle|status]
   status        Show the current mode and lid/display state
   status --json Machine-readable state for scripts and the bar
   status --strict Exit 1 if the mode is inconsistent
+  doctor        Diagnose dependencies, units, lock, panel, power, and state
 EOF
     exit 1
     ;;

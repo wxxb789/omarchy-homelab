@@ -40,6 +40,7 @@ homelab off       # Laptop mode: suspend on lid close
 homelab toggle    # Switch modes
 homelab status    # Show mode, lid, inhibitor, display, power, deadline, boot
 homelab status --json --strict  # machine-readable, fail on inconsistency
+homelab doctor    # Diagnose dependencies, units, lock, panel, power, state
 ```
 
 `homelab on` also accepts `homelab` and `server` as the mode name; `homelab off`
@@ -165,9 +166,10 @@ airflow.
 
 ## Troubleshooting
 
-Start with `homelab status`. For missing bar icons, inhibitor failures, panel
-or DPMS problems, SSH drops on `homelab off`, closed-lid boots, clamshell
-setups, and uninstall checks, see
+Start with `homelab doctor`; it checks dependencies, units, the verified
+inhibitor lock, watcher, linger, panel, power, and the state contract. For
+missing bar icons, inhibitor failures, panel or DPMS problems, SSH drops on
+`homelab off`, closed-lid boots, clamshell setups, and uninstall checks, see
 [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Development

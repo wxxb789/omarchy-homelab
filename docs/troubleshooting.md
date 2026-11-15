@@ -1,6 +1,16 @@
 # Troubleshooting
 
-Start with the mode summary:
+Start with the doctor:
+
+```bash
+homelab doctor
+```
+
+It prints `[ok]`, `[warn]`, and `[fail]` lines for dependencies, hardware,
+units, the verified logind lock, watcher, linger, panel, power, and the state
+contract. A failure exits nonzero; warnings do not.
+
+For the compact mode summary:
 
 ```bash
 homelab status
