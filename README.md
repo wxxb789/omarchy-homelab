@@ -36,8 +36,8 @@ homelab toggle    # Switch modes
 homelab status    # Show mode, lid state, inhibitor, display, boot persistence
 ```
 
-Aliases: `homelab homelab` / `homelab server` are the same as `on`, and
-`homelab laptop` is the same as `off`.
+`homelab on` also accepts `homelab` and `server` as the mode name; `homelab off`
+also accepts `laptop`.
 
 ## How it works
 
