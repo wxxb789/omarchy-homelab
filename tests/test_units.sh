@@ -11,6 +11,7 @@ new_sandbox
 
 inhibit="$repo_dir/systemd/user/homelab-inhibit.service"
 lid="$repo_dir/systemd/user/homelab-lid.service"
+deadline="$repo_dir/systemd/user/homelab-deadline.service"
 
 # State follows XDG_STATE_HOME, which systemd expands as %S. The mode flag is
 # the only condition; there is no Wayland-session environment gate anymore.
@@ -67,3 +68,20 @@ assert_contains "$lid" 'StartLimitBurst=3' \
   "the lid watcher has a start burst limit"
 assert_contains "$lid" 'WantedBy=graphical-session.target' \
   "the lid watcher is enabled with the graphical session"
+
+assert_contains "$deadline" 'ConditionPathExists=%S/homelab/enabled' \
+  "the deadline service requires the mode flag"
+assert_contains "$deadline" 'ConditionPathExists=%S/homelab/deadline' \
+  "the deadline service requires a deadline"
+assert_contains "$deadline" 'ExecStart=%h/.local/bin/homelab-deadline' \
+  "the deadline service launches the installed helper"
+assert_contains "$deadline" 'Restart=no' \
+  "the deadline service does not restart after firing"
+assert_contains "$deadline" 'WantedBy=default.target' \
+  "the deadline service is enabled at boot"
+assert_contains "$deadline" 'StateDirectory=homelab' \
+  "the deadline service owns the private state directory"
+assert_contains "$deadline" 'ReadWritePaths=%S/homelab' \
+  "the deadline service may write the state directory"
+assert_contains "$deadline" 'TimeoutStopSec=5' \
+  "the deadline service has a bounded stop timeout"

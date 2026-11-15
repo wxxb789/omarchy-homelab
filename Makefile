@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-SCRIPTS := bin/homelab bin/homelab-lid-watch install.sh $(wildcard tests/*.sh)
+SCRIPTS := bin/homelab bin/homelab-lid-watch bin/homelab-deadline install.sh $(wildcard tests/*.sh)
 
 # These findings pre-date the test branch and live in product files, which
 # this branch deliberately does not modify. Keep linting the product scripts;
@@ -21,7 +21,7 @@ lint:
 	@if command -v shellcheck >/dev/null 2>&1; then \
 		shellcheck -x $(wildcard tests/*.sh) && \
 		shellcheck --exclude=$(PRODUCT_SHELLCHECK_EXCLUDES) \
-			bin/homelab bin/homelab-lid-watch install.sh && \
+			bin/homelab bin/homelab-lid-watch bin/homelab-deadline install.sh && \
 		echo "ok: shellcheck"; \
 	else \
 		echo "skip: shellcheck not installed"; \

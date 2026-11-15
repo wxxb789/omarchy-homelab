@@ -1,0 +1,38 @@
+#!/bin/bash
+# HomeLab mode deadline: sleep until the epoch in the deadline file, then turn
+# the mode off. Run as a user service so it survives logout/reboot when the
+# mode does.
+
+set -u
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/homelab"
+mode_flag="$state_dir/enabled"
+deadline_file="$state_dir/deadline"
+homelab_bin="${HOMELAB_BIN:-$HOME/.local/bin/homelab}"
+
+[[ -r $deadline_file ]] || exit 0
+
+deadline=$(<"$deadline_file")
+[[ $deadline =~ ^[0-9]+$ ]] || {
+  echo "homelab-deadline: invalid deadline: $deadline" >&2
+  exit 1
+}
+
+# Sleep in short chunks so a suspend or a clock jump does not make the deadline
+# fire late. The epoch is wall-clock; the chunk wakes after resume and checks it.
+while :; do
+  now=$(date +%s)
+  remaining=$((deadline - now))
+  (( remaining <= 0 )) && break
+  if (( remaining > 60 )); then
+    sleep 60
+  else
+    sleep "$remaining"
+  fi
+done
+
+# The user may have turned the mode off while this service was sleeping.
+[[ -f $mode_flag ]] || exit 0
+
+echo "homelab-deadline: deadline reached; turning HomeLab mode off" >&2
+HOMELAB_FROM_DEADLINE=1 exec "$homelab_bin" off

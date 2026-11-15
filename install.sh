@@ -27,7 +27,7 @@ Installs symlinks from this checkout into:
   $bin_dir
   $unit_dir
 
-and enables the two systemd user units. Laptop mode stays the default; run
+and enables the systemd user units. Laptop mode stays the default; run
 "homelab on" when you want the machine to keep running with the lid closed.
 
 It also installs and enables an Omarchy bar widget under:
@@ -128,6 +128,7 @@ uninstall() {
   refuse_root
   # Stop the watcher first: its ExecStopPost restores DPMS while Hyprland is
   # still alive. Then release the inhibitor, which may suspend a closed lid.
+  timeout 30 systemctl --user disable --now homelab-deadline.service >/dev/null 2>&1 || true
   timeout 30 systemctl --user disable --now homelab-lid.service >/dev/null 2>&1 || true
 
   if [[ -f $state_dir/lid-blanked ]]; then
@@ -151,9 +152,11 @@ uninstall() {
 
   remove_link "$bin_dir/homelab"
   remove_link "$bin_dir/homelab-lid-watch"
+  remove_link "$bin_dir/homelab-deadline"
   remove_link "$unit_dir/homelab-lid.service"
   remove_link "$unit_dir/homelab-inhibit.service"
-  rm -f "$state_dir/enabled" "$state_dir/lid-blanked" "$state_dir/lock"
+  remove_link "$unit_dir/homelab-deadline.service"
+  rm -f "$state_dir/enabled" "$state_dir/lid-blanked" "$state_dir/deadline" "$state_dir/lock"
 
   timeout 20 systemctl --user daemon-reload
 
@@ -180,23 +183,28 @@ esac
 refuse_root
 require hyprctl jq systemctl systemd-inhibit loginctl flock timeout omarchy-hw-laptop omarchy-hw-laptop-closed omarchy-hyprland-monitor-laptop
 
-chmod +x "$repo_dir/bin/homelab" "$repo_dir/bin/homelab-lid-watch"
+chmod +x "$repo_dir/bin/homelab" "$repo_dir/bin/homelab-lid-watch" "$repo_dir/bin/homelab-deadline"
 
 link "$repo_dir/bin/homelab" "$bin_dir/homelab"
 link "$repo_dir/bin/homelab-lid-watch" "$bin_dir/homelab-lid-watch"
+link "$repo_dir/bin/homelab-deadline" "$bin_dir/homelab-deadline"
 link "$repo_dir/systemd/user/homelab-inhibit.service" "$unit_dir/homelab-inhibit.service"
 link "$repo_dir/systemd/user/homelab-lid.service" "$unit_dir/homelab-lid.service"
+link "$repo_dir/systemd/user/homelab-deadline.service" "$unit_dir/homelab-deadline.service"
 
 mkdir -p "$state_dir"
 
 timeout 20 systemctl --user daemon-reload
-if ! timeout 20 systemctl --user enable homelab-inhibit.service homelab-lid.service; then
+if ! timeout 20 systemctl --user enable homelab-inhibit.service homelab-lid.service homelab-deadline.service; then
   echo "warning: could not enable the HomeLab user units." >&2
 fi
-timeout 20 systemctl --user reset-failed homelab-lid.service homelab-inhibit.service >/dev/null 2>&1 || true
+timeout 20 systemctl --user reset-failed homelab-lid.service homelab-inhibit.service homelab-deadline.service >/dev/null 2>&1 || true
 if [[ -f $state_dir/enabled ]]; then
   if ! timeout 20 systemctl --user start homelab-lid.service; then
     echo "warning: HomeLab is on, but the lid watcher did not start." >&2
+  fi
+  if [[ -f $state_dir/deadline ]] && ! timeout 20 systemctl --user start homelab-deadline.service; then
+    echo "warning: HomeLab has a deadline, but the deadline service did not start." >&2
   fi
 fi
 
