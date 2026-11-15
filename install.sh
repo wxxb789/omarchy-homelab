@@ -11,6 +11,8 @@ repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 bin_dir="${XDG_BIN_HOME:-$HOME/.local/bin}"
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/homelab"
+plugin_id="io.github.wxxb789.homelab"
+plugin_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$plugin_id"
 
 usage() {
   cat <<EOF
@@ -23,8 +25,11 @@ Installs symlinks from this checkout into:
 and enables the two systemd user units. Laptop mode stays the default; run
 "homelab on" when you want the machine to keep running with the lid closed.
 
-  --uninstall   Stop and disable the units, remove the symlinks, and return to
-                Laptop mode. This checkout is left untouched.
+It also installs and enables an Omarchy bar widget under:
+  $plugin_dir
+
+  --uninstall   Stop and disable the units, remove the symlinks and bar widget,
+                and return to Laptop mode. This checkout is left untouched.
 EOF
 }
 
@@ -54,6 +59,48 @@ link() {
   ln -sfn "$src" "$dst"
 }
 
+install_plugin() {
+  local omarchy_bin source_dir target_dir
+  omarchy_bin=$(command -v omarchy 2>/dev/null || true)
+  if [[ -z $omarchy_bin ]]; then
+    echo "warning: omarchy CLI not found; skipping the bar widget." >&2
+    return 0
+  fi
+
+  source_dir=$(cd -- "$repo_dir" && pwd)
+  target_dir=$(cd -- "$plugin_dir" 2>/dev/null && pwd || true)
+
+  if [[ $source_dir != "$target_dir" ]]; then
+    if ! mkdir -p "$plugin_dir/plugin" ||
+      ! cp -f "$repo_dir/manifest.json" "$plugin_dir/manifest.json" ||
+      ! cp -f "$repo_dir/plugin/BarWidget.qml" "$plugin_dir/plugin/BarWidget.qml"; then
+      echo "warning: could not install the bar widget into $plugin_dir." >&2
+      return 0
+    fi
+  fi
+
+  # The running shell only learns about a new directory after a rescan, and
+  # the rescan finishes asynchronously. Retry briefly: the first enable can
+  # still answer "unknown" while the registry is catching up.
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    "$omarchy_bin" shell shell rescanPlugins >/dev/null 2>&1 || true
+    "$omarchy_bin" plugin enable "$plugin_id" --section right >/dev/null 2>&1 || true
+    if "$omarchy_bin" plugin list --json 2>/dev/null |
+      jq -e --arg id "$plugin_id" 'any(.[]; .id == $id and .enabled == true)' >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.5
+  done
+
+  if ! "$omarchy_bin" plugin list --json 2>/dev/null |
+    jq -e --arg id "$plugin_id" 'any(.[]; .id == $id and .enabled == true)' >/dev/null 2>&1; then
+    echo "warning: the bar widget is installed but not enabled." >&2
+    echo "         Run: omarchy-shell shell rescanPlugins" >&2
+    echo "              omarchy plugin enable $plugin_id --section right" >&2
+  fi
+}
+
 uninstall() {
   if [[ -f $state_dir/lid-blanked ]]; then
     hyprctl dispatch 'hl.dsp.dpms({ action = "on" })' >/dev/null 2>&1 || true
@@ -61,6 +108,11 @@ uninstall() {
 
   systemctl --user disable --now homelab-lid.service >/dev/null 2>&1 || true
   systemctl --user disable --now homelab-inhibit.service >/dev/null 2>&1 || true
+
+  if command -v omarchy >/dev/null 2>&1; then
+    omarchy plugin remove "$plugin_id" --yes >/dev/null 2>&1 || true
+  fi
+  rm -rf "$plugin_dir"
 
   rm -f "$bin_dir/homelab" "$bin_dir/homelab-lid-watch"
   rm -f "$unit_dir/homelab-lid.service" "$unit_dir/homelab-inhibit.service"
@@ -115,6 +167,8 @@ if [[ $(loginctl show-user "$USER" -p Linger --value 2>/dev/null || true) != yes
   fi
 fi
 
+install_plugin
+
 echo
 echo "Installed. Laptop mode is the default."
 "$bin_dir/homelab" status || true
@@ -122,3 +176,4 @@ echo
 echo "Switch with: homelab on    (HomeLab mode)"
 echo "             homelab off   (Laptop mode)"
 echo "             homelab status"
+echo "Or click the HomeLab icon in the bar."
