@@ -6,9 +6,10 @@ Start with the mode summary:
 homelab status
 ```
 
-It reports the mode flag, lid state, inhibitor unit, lid watcher, internal
-display, panel blank state, and boot persistence. Exit status is nonzero when
-the flag and inhibitor disagree.
+It reports the mode flag, lid state, verified inhibitor lock, lid watcher,
+internal display, panel blank state, and boot persistence. Add `--json` for a
+machine-readable snapshot; add `--strict` to exit nonzero when the state is
+inconsistent.
 
 If the summary is not enough, collect the detailed state:
 
@@ -105,7 +106,8 @@ journalctl -b -u systemd-logind -n 50 --no-pager
 
 Expected state:
 
-- `homelab status` reports `Mode: HomeLab` and `Lid suspend: inhibited`.
+- `homelab status` reports `Mode: HomeLab`, `Lid suspend: inhibited (lock
+  verified)`, and `State: consistent`.
 - `homelab-inhibit.service` is `active (running)`.
 - `systemd-inhibit --list` has a row whose WHO is `HomeLab`, whose WHAT
   contains `handle-lid-switch`, and whose MODE is `block`.
@@ -115,8 +117,8 @@ Expected state:
   systemctl --user show -p MainPID --value homelab-inhibit.service
   ```
 
-If `homelab status` reports `Health: inconsistent: mode flag set, inhibitor
-inactive`, re-assert the mode:
+If `homelab status` reports `State: INCONSISTENT` and a line such as
+`! mode flag is set but the lid inhibitor is not active`, re-assert the mode:
 
 ```bash
 homelab on

@@ -153,8 +153,15 @@ setups, and uninstall checks, see
 
 ## Development
 
-Tests belong in `tests/`. The test harness is developed separately; once
-present, run `make check`.
+Run the test suite and static checks with:
+
+```bash
+make check
+```
+
+It covers bash syntax, shellcheck (when installed), systemd unit verification,
+the CLI, the lid watcher, and the unit contracts. The harness uses fake
+systemd, Hyprland, and Omarchy commands; it does not touch the live session.
 
 ## Uninstall
 
