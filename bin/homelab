@@ -1,0 +1,156 @@
+#!/bin/bash
+# Switch this machine between Laptop mode and HomeLab mode.
+#
+#   Laptop   Closing the lid locks the session and logind suspends as usual.
+#   HomeLab  Closing the lid blanks the internal display, but a logind inhibitor
+#            keeps the machine running. Opening the lid brings the display and
+#            keyboard back as usual. Nothing is disabled.
+
+set -u
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/homelab"
+mode_flag="$state_dir/enabled"
+blanked_flag="$state_dir/lid-blanked"
+inhibit_unit="homelab-inhibit.service"
+lid_unit="homelab-lid.service"
+
+mkdir -p "$state_dir"
+
+lid_closed() {
+  omarchy-hw-laptop-closed >/dev/null 2>&1
+}
+
+mode_name() {
+  if [[ -f $mode_flag ]]; then echo "HomeLab"; else echo "Laptop"; fi
+}
+
+notify() {
+  if [[ -n ${WAYLAND_DISPLAY:-} ]] && command -v notify-send >/dev/null 2>&1; then
+    notify-send -a "HomeLab" -i "computer" "$1" "$2" >/dev/null 2>&1 || true
+  fi
+}
+
+hypr() {
+  local sig
+
+  if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] &&
+    HYPRLAND_INSTANCE_SIGNATURE=$HYPRLAND_INSTANCE_SIGNATURE hyprctl "$@" 2>/dev/null; then
+    return 0
+  fi
+
+  for sig in "${XDG_RUNTIME_DIR:-/run/user/$UID}"/hypr/*; do
+    [[ -S $sig/.socket.sock ]] || continue
+    HYPRLAND_INSTANCE_SIGNATURE=${sig##*/} hyprctl "$@" 2>/dev/null && return 0
+  done
+
+  return 1
+}
+
+enable_homelab() {
+  : >"$mode_flag"
+
+  # Keep the lid watcher (part of the graphical session) available so the
+  # panel is blanked/restored even when the mode is toggled from elsewhere.
+  systemctl --user enable --now "$lid_unit" >/dev/null 2>&1 || true
+  systemctl --user enable "$inhibit_unit" >/dev/null 2>&1 || true
+
+  if ! systemctl --user start "$inhibit_unit" >/dev/null 2>&1; then
+    rm -f "$mode_flag"
+    echo "Could not take the lid inhibitor. Nothing changed." >&2
+    systemctl --user status "$inhibit_unit" --no-pager 2>&1 | tail -n 20 >&2
+    return 1
+  fi
+
+  return 0
+}
+
+disable_homelab() {
+  local closed=0
+  lid_closed && closed=1
+
+  rm -f "$mode_flag"
+  systemctl --user stop "$inhibit_unit" >/dev/null 2>&1 || true
+
+  if (( closed )); then
+    echo "HomeLab mode off. The lid is still closed, so logind may not suspend"
+    echo "until the next lid event. Run 'systemctl suspend' to suspend now."
+  else
+    echo "HomeLab mode off. Closing the lid suspends as before."
+  fi
+}
+
+case "${1:-status}" in
+  on|homelab|server)
+    enable_homelab || exit 1
+    if lid_closed; then
+      echo "HomeLab mode on. The lid is closed: keeping the machine running."
+      notify "HomeLab mode" "Lid closed; machine keeps running."
+    else
+      echo "HomeLab mode on. Closing the lid blanks the display but does not suspend."
+      notify "HomeLab mode" "Closing the lid will no longer suspend."
+    fi
+    ;;
+
+  off|laptop)
+    disable_homelab
+    notify "Laptop mode" "Lid close suspends as usual."
+    ;;
+
+  toggle)
+    if [[ -f $mode_flag ]]; then
+      exec "$0" off
+    else
+      exec "$0" on
+    fi
+    ;;
+
+  status)
+    printf 'Mode:             %s\n' "$(mode_name)"
+
+    if lid_closed; then
+      printf 'Lid:              closed\n'
+    else
+      printf 'Lid:              open\n'
+    fi
+
+    if systemctl --user is-active --quiet "$inhibit_unit"; then
+      printf 'Lid suspend:      inhibited (machine keeps running)\n'
+    else
+      printf 'Lid suspend:      enabled (logind suspends)\n'
+    fi
+
+    internal=$(omarchy-hyprland-monitor-laptop 2>/dev/null || true)
+    if [[ -n $internal ]]; then
+      state=$(hypr monitors all -j 2>/dev/null |
+        jq -r --arg m "$internal" '.[] | select(.name == $m) |
+          if .disabled then "disabled" else "enabled" end' |
+        head -n 1)
+      printf 'Internal display: %s (%s)\n' "$internal" "${state:-unknown}"
+    fi
+
+    if [[ -f $mode_flag ]] && systemctl --user is-enabled --quiet "$inhibit_unit" 2>/dev/null; then
+      printf 'At boot:          HomeLab (persistent, linger: %s)\n' \
+        "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null || echo unknown)"
+    elif [[ -f $mode_flag ]]; then
+      printf 'At boot:          HomeLab flag set, but the unit is not enabled\n'
+    else
+      printf 'At boot:          Laptop (default)\n'
+    fi
+
+    if [[ -f $blanked_flag ]]; then
+      printf 'Panel blanked:    yes (restored when the lid opens)\n'
+    fi
+    ;;
+
+  *)
+    cat <<'EOF'
+Usage: homelab [on|off|toggle|status]
+
+  on, homelab   HomeLab mode: keep running with the lid closed
+  off, laptop   Laptop mode: suspend on lid close
+  toggle        Switch between the two modes
+  status        Show the current mode and lid/display state
+EOF
+    exit 1
+    ;;
+esac

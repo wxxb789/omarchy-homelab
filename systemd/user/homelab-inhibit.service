@@ -1,0 +1,12 @@
+[Unit]
+Description=HomeLab mode: keep the machine running when the lid is closed
+Documentation=man:systemd-inhibit(1)
+ConditionPathExists=%h/.local/state/homelab/enabled
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/systemd-inhibit --what=handle-lid-switch --who=HomeLab --why="HomeLab mode: keep the machine running with the lid closed" --mode=block /usr/bin/sleep infinity
+Restart=no
+
+[Install]
+WantedBy=default.target

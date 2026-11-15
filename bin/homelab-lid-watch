@@ -1,0 +1,87 @@
+#!/bin/bash
+# HomeLab mode helper: blank the internal display while the lid is closed and
+# restore it when the lid opens. Input devices are never touched, and this
+# works without suspending the machine.
+
+set -u
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/homelab"
+mode_flag="$state_dir/enabled"
+blanked_flag="$state_dir/lid-blanked"
+mkdir -p "$state_dir"
+
+# Read the ACPI lid directly when it exists (cheap, no subprocess), and fall
+# back to Omarchy's helper for machines that report the lid elsewhere.
+lid_closed() {
+  local base="${OMARCHY_ACPI_LID_PATH:-/proc/acpi/button/lid}"
+  local state found=0
+  for state in "$base"/*/state; do
+    [[ -r $state ]] || continue
+    found=1
+    [[ $(<"$state") == *closed* ]] && return 0
+  done
+  (( found )) && return 1
+
+  omarchy-hw-laptop-closed >/dev/null 2>&1
+}
+
+# Talk to whichever Hyprland instance is current. A user service started at
+# boot (via linger) has no HYPRLAND_INSTANCE_SIGNATURE in its environment, and
+# the signature changes whenever Hyprland restarts, so resolve it each time.
+hypr() {
+  local sig
+
+  if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] &&
+    HYPRLAND_INSTANCE_SIGNATURE=$HYPRLAND_INSTANCE_SIGNATURE hyprctl "$@" 2>/dev/null; then
+    return 0
+  fi
+
+  for sig in "${XDG_RUNTIME_DIR:-/run/user/$UID}"/hypr/*; do
+    [[ -S $sig/.socket.sock ]] || continue
+    HYPRLAND_INSTANCE_SIGNATURE=${sig##*/} hyprctl "$@" 2>/dev/null && return 0
+  done
+
+  return 1
+}
+
+internal=""
+ticks=0
+
+while :; do
+  sleep 2
+  ticks=$((ticks + 1))
+
+  # Re-resolve periodically in case the internal output appears later or
+  # Hyprland restarted with a new instance signature.
+  if [[ -z $internal ]] || (( ticks % 30 == 0 )); then
+    internal=$(omarchy-hyprland-monitor-laptop 2>/dev/null || true)
+  fi
+  [[ -n $internal ]] || continue
+
+  if lid_closed; then
+    # Only act while HomeLab mode is on.
+    [[ -f $mode_flag ]] || continue
+
+    # Blank immediately on the first close, then re-assert every 10 seconds so
+    # a stray input event or a Hyprland restart cannot leave the panel lit
+    # behind the closed lid.
+    if [[ ! -f $blanked_flag ]] || (( ticks % 5 == 0 )); then
+      # A clamshell session with an external monitor disables the internal
+      # output; leave it alone so the external display stays usable.
+      if hypr monitors all -j | jq -e --arg m "$internal" \
+        'any(.[]; .name == $m and .disabled == false)' >/dev/null 2>&1; then
+        if hypr dispatch "hl.dsp.dpms({ action = \"off\", monitor = \"$internal\" })" >/dev/null 2>&1; then
+          : >"$blanked_flag"
+        fi
+      fi
+    fi
+  else
+    # Restore the panel even if the mode was switched off while the lid was
+    # closed, so the next lid open always gives a working screen.
+    if [[ -f $blanked_flag ]]; then
+      if hypr dispatch "hl.dsp.dpms({ action = \"on\", monitor = \"$internal\" })" >/dev/null 2>&1; then
+        rm -f "$blanked_flag"
+      fi
+    fi
+  fi
+done
