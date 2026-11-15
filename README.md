@@ -81,6 +81,12 @@ omarchy-shell io.github.wxxb789.homelab refresh
 If the icon is missing after an install, see
 [Bar icon missing](docs/troubleshooting.md#bar-icon-missing).
 
+## Menu and keybinding
+
+Add a **Trigger → Toggle → HomeLab Mode** row and an optional keybinding from
+[docs/integrations.md](docs/integrations.md). The same document covers
+installing and updating as an Omarchy plugin and the upstream proposal.
+
 ## How it works
 
 - **`homelab-inhibit.service`** (user unit, enabled at `default.target`) runs
