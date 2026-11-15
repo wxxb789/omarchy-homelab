@@ -1,18 +1,20 @@
 [Unit]
 Description=HomeLab mode: blank the internal display while the lid is closed
 PartOf=graphical-session.target
+Wants=homelab-inhibit.service
 After=graphical-session.target homelab-inhibit.service
-ConditionPathExists=%h/.local/state/homelab/enabled
-ConditionEnvironment=WAYLAND_DISPLAY
+ConditionPathExists=%S/homelab/enabled
 StartLimitIntervalSec=30
 StartLimitBurst=3
 
 [Service]
 Type=simple
+SyslogIdentifier=homelab-lid
 ExecStart=%h/.local/bin/homelab-lid-watch
 ExecStopPost=-%h/.local/bin/homelab-lid-watch --restore
-Restart=always
+Restart=on-failure
 RestartSec=2
+TimeoutStopSec=5
 
 [Install]
 WantedBy=graphical-session.target

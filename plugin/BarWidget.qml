@@ -14,7 +14,11 @@ BarWidget {
   moduleName: "io.github.wxxb789.homelab"
 
   readonly property string homelabBin: Quickshell.env("HOME") + "/.local/bin/homelab"
-  readonly property string flagPath: Quickshell.env("HOME") + "/.local/state/homelab/enabled"
+  readonly property string stateHome: {
+    var xdg = Quickshell.env("XDG_STATE_HOME")
+    return xdg && xdg.length > 0 ? xdg : Quickshell.env("HOME") + "/.local/state"
+  }
+  readonly property string flagPath: stateHome + "/homelab/enabled"
 
   property bool modeOn: false
   property bool busy: false
@@ -39,7 +43,7 @@ BarWidget {
 
   Process {
     id: probe
-    command: ["/bin/sh", "-c", "test -x \"$HOME/.local/bin/homelab\""]
+    command: ["/usr/bin/test", "-x", root.homelabBin]
     onExited: function(exitCode) { root.installed = exitCode === 0 }
   }
 

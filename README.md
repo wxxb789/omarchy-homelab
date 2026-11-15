@@ -63,7 +63,8 @@ If the icon is missing after an install, run `omarchy restart shell` once.
 - **`homelab-inhibit.service`** (user unit, enabled at `default.target`) runs
   `systemd-inhibit --what=handle-lid-switch ... sleep infinity`. While that
   inhibitor is held, logind ignores the lid switch. The unit starts when
-  `~/.local/state/homelab/enabled` exists. With systemd lingering enabled, it
+  `$XDG_STATE_HOME/homelab/enabled` exists (default
+  `~/.local/state/homelab/enabled`). With systemd lingering enabled, it
   starts at boot before login, so a reboot with the lid shut does not suspend
   the machine.
 - **`homelab-lid.service`** (user unit, part of `graphical-session.target`) is
@@ -101,8 +102,10 @@ If the icon is missing after an install, run `omarchy restart shell` once.
   stay lit; the watcher starts when the graphical session starts.
 - A closed laptop has little airflow. Use HomeLab mode on a hard surface with
   ventilation, preferably on AC, and do not leave it running in a bag.
-- Paths are fixed under `~/.local` and `~/.config`, matching Omarchy's own
-  state and unit locations.
+- State follows `XDG_STATE_HOME` (default `~/.local/state`). Commands live in
+  `~/.local/bin`; the user units follow `XDG_CONFIG_HOME` (default
+  `~/.config/systemd/user`); the bar widget lives under
+  `~/.config/omarchy/plugins`, matching Omarchy's own plugin tools.
 - Tested on Omarchy 4.5 with a ThinkPad (internal output `eDP-1`). Some
   ThinkPads lose the internal keyboard after a lid-open without suspend; a
   suspend/resume cycle resets the controller.

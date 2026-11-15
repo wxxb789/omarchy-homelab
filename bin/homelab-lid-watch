@@ -5,10 +5,13 @@
 
 set -u
 
-state_dir="$HOME/.local/state/homelab"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/homelab"
 mode_flag="$state_dir/enabled"
 blanked_flag="$state_dir/lid-blanked"
-mkdir -p "$state_dir"
+if ! mkdir -p "$state_dir"; then
+  echo "homelab-lid: could not create $state_dir." >&2
+  exit 1
+fi
 
 log() {
   printf 'homelab-lid: %s\n' "$*" >&2
@@ -59,44 +62,136 @@ resolve_internal() {
   printf '%s\n' "$internal"
 }
 
+monitor_json() {
+  local monitors
+  monitors=$(hypr monitors all -j) || return 1
+  jq -e . <<<"$monitors" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$monitors"
+}
+
+monitor_present() {
+  local monitors="$1" internal="$2"
+  jq -e --arg m "$internal" 'any(.[]; .name == $m)' <<<"$monitors" >/dev/null 2>&1
+}
+
+monitor_enabled() {
+  local monitors="$1" internal="$2"
+  jq -e --arg m "$internal" \
+    'any(.[]; .name == $m and .disabled == false)' <<<"$monitors" >/dev/null 2>&1
+}
+
+monitor_dpms() {
+  local monitors="$1" internal="$2"
+  jq -r --arg m "$internal" \
+    '.[] | select(.name == $m) | .dpmsStatus' <<<"$monitors" | head -n 1
+}
+
+# The marker holds the output we blanked. Legacy empty markers fall back to
+# resolving the current internal output.
+blanked_monitor() {
+  local saved
+  saved=""
+  [[ -r $blanked_flag ]] && saved=$(<"$blanked_flag")
+  if valid_monitor "$saved"; then
+    printf '%s\n' "$saved"
+    return 0
+  fi
+  resolve_internal
+}
+
 # Restore the panel without relying on the lid being open. Used by the unit's
 # ExecStopPost and by `homelab off`, so stopping the watcher cannot leave the
 # internal panel blanked.
 restore_panel() {
+  local internal monitors dpms tries=0
+
   [[ -f $blanked_flag ]] || return 0
 
-  local internal monitors
-  internal=$(resolve_internal) || {
+  internal=$(blanked_monitor) || {
     log "restore skipped: no safe internal output"
     return 1
   }
 
-  monitors=$(hypr monitors all -j) || {
+  monitors=$(monitor_json) || {
     log "restore skipped: Hyprland did not answer"
     return 1
   }
 
-  if ! jq -e . <<<"$monitors" >/dev/null 2>&1; then
-    log "restore skipped: invalid monitor JSON"
+  if ! monitor_present "$monitors" "$internal"; then
+    rm -f "$blanked_flag"
+    log "restore skipped: $internal is gone"
+    return 0
+  fi
+
+  dpms=$(monitor_dpms "$monitors" "$internal")
+  if [[ $dpms != false ]]; then
+    rm -f "$blanked_flag"
+    return 0
+  fi
+
+  if ! hypr dispatch "hl.dsp.dpms({ action = \"on\", monitor = \"$internal\" })" >/dev/null 2>&1; then
+    log "restore failed for $internal"
     return 1
   fi
 
-  # An output disabled by clamshell has no panel to restore. Drop the stale
-  # flag so a later lid open does not keep trying.
-  if ! jq -e --arg m "$internal" \
-    'any(.[]; .name == $m and .disabled == false)' <<<"$monitors" >/dev/null 2>&1; then
-    rm -f "$blanked_flag"
-    return 0
-  fi
+  while (( tries < 5 )); do
+    monitors=$(monitor_json) || break
+    if [[ $(monitor_dpms "$monitors" "$internal") == true ]]; then
+      rm -f "$blanked_flag"
+      log "restored internal panel ($internal)"
+      return 0
+    fi
+    tries=$((tries + 1))
+    sleep 0.1
+  done
 
-  if hypr dispatch "hl.dsp.dpms({ action = \"on\", monitor = \"$internal\" })" >/dev/null 2>&1; then
-    rm -f "$blanked_flag"
-    log "restored internal panel ($internal)"
-    return 0
-  fi
-
-  log "restore failed for $internal"
+  log "restore did not take effect for $internal"
   return 1
+}
+
+# Blank the panel and record which output we own. A failed dispatch must not
+# leave the marker behind, and an unknown monitor name is never interpolated
+# into Hyprland's Lua dispatch.
+blank_panel() {
+  local internal="$1" monitors dpms
+  valid_monitor "$internal" || return 1
+
+  monitors=$(monitor_json) || return 1
+  if ! monitor_enabled "$monitors" "$internal"; then
+    rm -f "$blanked_flag"
+    return 0
+  fi
+
+  dpms=$(monitor_dpms "$monitors" "$internal")
+  if [[ $dpms == true ]]; then
+    if ! hypr dispatch "hl.dsp.dpms({ action = \"off\", monitor = \"$internal\" })" >/dev/null 2>&1; then
+      return 1
+    fi
+  fi
+
+  # An unknown name makes Hyprland's dpms dispatcher affect every output.
+  # Verify the output still exists after the dispatch; if it vanished, undo
+  # the broadcast before writing a marker.
+  monitors=$(monitor_json) || true
+  if [[ -n ${monitors:-} ]] && ! monitor_present "$monitors" "$internal"; then
+    hypr dispatch 'hl.dsp.dpms({ action = "on" })' >/dev/null 2>&1 || true
+    log "blank aborted: $internal vanished; all outputs restored"
+    return 1
+  fi
+
+  if [[ -n ${monitors:-} ]] && [[ $(monitor_dpms "$monitors" "$internal") != false ]]; then
+    log "blank did not take effect for $internal"
+    return 1
+  fi
+
+  if ! printf '%s\n' "$internal" >"$blanked_flag"; then
+    hypr dispatch "hl.dsp.dpms({ action = \"on\", monitor = \"$internal\" })" >/dev/null 2>&1 || true
+    log "blank aborted: could not write $blanked_flag"
+    return 1
+  fi
+
+  log "blanked internal panel ($internal)"
+  return 0
 }
 
 if [[ ${1:-} == --restore ]]; then
@@ -111,6 +206,13 @@ while :; do
   sleep 2
   ticks=$((ticks + 1))
 
+  # The unit is condition-gated, but a manual `rm enabled` must also restore a
+  # blanked panel and stop the loop rather than leaving a watcher behind.
+  if [[ ! -f $mode_flag ]]; then
+    restore_panel || true
+    exit 0
+  fi
+
   # Re-resolve periodically in case the internal output appears later or
   # Hyprland restarted with a new instance signature.
   if [[ -z $internal ]] || (( ticks % 30 == 0 )); then
@@ -119,28 +221,13 @@ while :; do
   [[ -n $internal ]] || continue
 
   if lid_closed; then
-    # Only act while HomeLab mode is on.
-    [[ -f $mode_flag ]] || continue
-
     # Blank immediately on the first close, then re-assert every 10 seconds so
     # a stray input event or a Hyprland restart cannot leave the panel lit
     # behind the closed lid.
     if [[ ! -f $blanked_flag ]] || (( ticks % 5 == 0 )); then
-      # A clamshell session with an external monitor disables the internal
-      # output; leave it alone so the external display stays usable.
-      if hypr monitors all -j | jq -e --arg m "$internal" \
-        'any(.[]; .name == $m and .disabled == false)' >/dev/null 2>&1; then
-        if hypr dispatch "hl.dsp.dpms({ action = \"off\", monitor = \"$internal\" })" >/dev/null 2>&1; then
-          if [[ ! -f $blanked_flag ]]; then
-            log "blanked internal panel ($internal)"
-          fi
-          : >"$blanked_flag"
-        fi
-      fi
+      blank_panel "$internal" || true
     fi
   else
-    # Restore the panel even if the mode was switched off while the lid was
-    # closed, so the next lid open always gives a working screen.
     restore_panel || true
   fi
 done

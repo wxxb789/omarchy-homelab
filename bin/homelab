@@ -8,14 +8,14 @@
 
 set -u
 
-state_dir="$HOME/.local/state/homelab"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/homelab"
 mode_flag="$state_dir/enabled"
 blanked_flag="$state_dir/lid-blanked"
 lock_file="$state_dir/lock"
 inhibit_unit="homelab-inhibit.service"
 lid_unit="homelab-lid.service"
 
-if (( EUID == 0 )); then
+if (( ${EUID:-$(id -u)} == 0 )); then
   echo "homelab: run this as your desktop user, not with sudo or as root." >&2
   exit 1
 fi
@@ -26,7 +26,7 @@ if ! mkdir -p "$state_dir"; then
 fi
 
 lid_closed() {
-  omarchy-hw-laptop-closed >/dev/null 2>&1
+  timeout 3 omarchy-hw-laptop-closed >/dev/null 2>&1
 }
 
 is_laptop() {
@@ -50,8 +50,29 @@ mode_name() {
 
 notify() {
   if [[ -n ${WAYLAND_DISPLAY:-} ]] && command -v notify-send >/dev/null 2>&1; then
-    notify-send -a "HomeLab" -i "computer" "$1" "$2" >/dev/null 2>&1 || true
+    timeout 2 notify-send -a "HomeLab" -i "computer" "$1" "$2" >/dev/null 2>&1 || true
   fi
+}
+
+sc() {
+  timeout 20 systemctl --user "$@"
+}
+
+inhibitor_held() {
+  local pid
+
+  pid=$(timeout 2 systemctl --user show -p MainPID --value "$inhibit_unit" 2>/dev/null || true)
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+
+  if timeout 2 systemd-inhibit --list --json=short --no-pager 2>/dev/null |
+    jq -e --argjson pid "$pid" \
+      'any(.[]; .pid == $pid and ((.what | split(":")) | index("handle-lid-switch")))' >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Older systemd without --json: match the distinctive who string.
+  timeout 2 systemd-inhibit --list --no-pager 2>/dev/null |
+    grep -q '^HomeLab[[:space:]]'
 }
 
 hypr() {
@@ -68,6 +89,10 @@ hypr() {
   done
 
   return 1
+}
+
+valid_monitor() {
+  [[ $1 =~ ^[A-Za-z0-9._-]+$ ]]
 }
 
 take_lock() {
@@ -87,10 +112,10 @@ take_lock() {
 }
 
 start_watcher() {
-  if ! systemctl --user start "$lid_unit" >/dev/null 2>&1; then
+  if ! sc start "$lid_unit" >/dev/null 2>&1; then
     return 1
   fi
-  systemctl --user is-active --quiet "$lid_unit"
+  sc is-active --quiet "$lid_unit"
 }
 
 restore_panel() {
@@ -103,8 +128,10 @@ restore_panel() {
   fi
 
   if [[ -x $watcher ]]; then
-    "$watcher" --restore >/dev/null 2>&1 || true
+    "$watcher" --restore
+    return $?
   fi
+  return 1
 }
 
 announce_on() {
@@ -118,17 +145,45 @@ announce_on() {
 }
 
 enable_homelab() {
+  local tries=0 held=0
+
   if ! : >"$mode_flag"; then
     echo "HomeLab mode was not enabled: could not write $mode_flag." >&2
     return 1
   fi
 
   # The inhibitor is the guarantee; the lid watcher only blanks the panel.
-  if ! systemctl --user start "$inhibit_unit" >/dev/null 2>&1; then
+  sc reset-failed "$inhibit_unit" >/dev/null 2>&1 || true
+  if ! sc start "$inhibit_unit" >/dev/null 2>&1; then
+    sc stop "$lid_unit" >/dev/null 2>&1 || true
+    sc stop "$inhibit_unit" >/dev/null 2>&1 || true
+    restore_panel
     rm -f "$mode_flag"
     echo "HomeLab mode was not enabled: the lid inhibitor did not start." >&2
-    systemctl --user status "$inhibit_unit" --no-pager 2>&1 | tail -n 20 >&2
+    sc status "$inhibit_unit" --no-pager 2>&1 | tail -n 20 >&2
     notify "HomeLab mode failed" "The lid inhibitor did not start."
+    return 1
+  fi
+
+  # Type=simple reports the unit started before systemd-inhibit has acquired
+  # the logind lock. Wait for the inhibitor to appear in the list; a running
+  # unit without a held lock is the one failure the bar cannot see.
+  while (( tries < 20 )); do
+    if sc is-active --quiet "$inhibit_unit" && inhibitor_held; then
+      held=1
+      break
+    fi
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+
+  if (( !held )); then
+    sc stop "$lid_unit" >/dev/null 2>&1 || true
+    sc stop "$inhibit_unit" >/dev/null 2>&1 || true
+    restore_panel
+    rm -f "$mode_flag"
+    echo "HomeLab mode was not enabled: no lid inhibitor is held." >&2
+    notify "HomeLab mode failed" "No lid inhibitor is held."
     return 1
   fi
 
@@ -137,7 +192,7 @@ enable_homelab() {
     echo "         The machine will keep running; the internal panel may stay on." >&2
   fi
 
-  if ! systemctl --user enable "$inhibit_unit" "$lid_unit" >/dev/null 2>&1; then
+  if ! sc enable "$inhibit_unit" "$lid_unit" >/dev/null 2>&1; then
     echo "warning: could not enable the units for boot; this mode will not survive a reboot." >&2
   fi
 
@@ -152,24 +207,35 @@ disable_homelab() {
 
   # Stop the watcher first. Its ExecStopPost restores DPMS while Hyprland is
   # still alive, and its stop ordering keeps the inhibitor held until then.
-  if ! systemctl --user stop "$lid_unit" >/dev/null 2>&1; then
+  if ! sc stop "$lid_unit" >/dev/null 2>&1; then
     echo "warning: could not stop the lid watcher." >&2
   fi
-  restore_panel
 
-  if (( closed )); then
-    echo "HomeLab mode off. The lid is closed; releasing the inhibitor may suspend immediately."
-  fi
-
-  if ! systemctl --user stop "$inhibit_unit" >/dev/null 2>&1; then
-    echo "warning: could not stop the lid inhibitor; check 'systemctl --user status $inhibit_unit'." >&2
+  if ! restore_panel; then
+    echo "warning: could not restore the internal panel; keeping HomeLab mode so it can retry." >&2
+    : >"$mode_flag"
+    start_watcher || true
+    return 1
   fi
 
   if (( closed )); then
-    echo "If the machine stayed awake, run 'systemctl suspend' to suspend now."
+    echo "Releasing the lid inhibitor; a closed lid may suspend immediately."
+  fi
+
+  if ! sc stop "$inhibit_unit" >/dev/null 2>&1; then
+    echo "warning: could not stop the lid inhibitor; restoring HomeLab mode." >&2
+    : >"$mode_flag"
+    start_watcher || true
+    return 1
+  fi
+
+  if (( closed )); then
+    echo "HomeLab mode off. If the machine stayed awake, run 'systemctl suspend' to suspend now."
   else
     echo "HomeLab mode off. Closing the lid suspends as before."
   fi
+
+  return 0
 }
 
 cmd_on() {
@@ -181,19 +247,18 @@ cmd_on() {
 
 cmd_off() {
   take_lock
-  require_laptop
-  disable_homelab
+  disable_homelab || exit 1
   notify "Laptop mode" "Lid close suspends as usual."
 }
 
 cmd_toggle() {
   take_lock
-  require_laptop
 
   if [[ -f $mode_flag ]]; then
-    disable_homelab
+    disable_homelab || exit 1
     notify "Laptop mode" "Lid close suspends as usual."
   else
+    require_laptop
     enable_homelab || exit 1
     announce_on
   fi
@@ -201,13 +266,13 @@ cmd_toggle() {
 
 status() {
   local flag=0 inhibited=0 watcher=0 enabled=0 lid_enabled=0 blanked=0 issues=0 linger
-  local internal state
+  local internal state blanked_monitor user_name
 
   [[ -f $mode_flag ]] && flag=1
-  systemctl --user is-active --quiet "$inhibit_unit" && inhibited=1
-  systemctl --user is-active --quiet "$lid_unit" && watcher=1
-  systemctl --user is-enabled --quiet "$inhibit_unit" 2>/dev/null && enabled=1
-  systemctl --user is-enabled --quiet "$lid_unit" 2>/dev/null && lid_enabled=1
+  sc is-active --quiet "$inhibit_unit" && inhibited=1
+  sc is-active --quiet "$lid_unit" && watcher=1
+  sc is-enabled --quiet "$inhibit_unit" 2>/dev/null && enabled=1
+  sc is-enabled --quiet "$lid_unit" 2>/dev/null && lid_enabled=1
   [[ -f $blanked_flag ]] && blanked=1
 
   printf 'Mode:             %s\n' "$(mode_name)"
@@ -233,6 +298,7 @@ status() {
   fi
 
   internal=$(timeout 3 omarchy-hyprland-monitor-laptop 2>/dev/null || true)
+  valid_monitor "$internal" || internal=""
   if [[ -z $internal ]]; then
     printf 'Internal display: not detected\n'
   else
@@ -243,7 +309,8 @@ status() {
     printf 'Internal display: %s (%s)\n' "$internal" "${state:-unknown}"
   fi
 
-  linger=$(loginctl show-user "$USER" -p Linger --value 2>/dev/null || echo unknown)
+  user_name=$(id -un)
+  linger=$(timeout 5 loginctl show-user "$user_name" -p Linger --value 2>/dev/null || echo unknown)
   [[ -n $linger ]] || linger=unknown
 
   if (( flag )) && (( enabled )); then
@@ -259,7 +326,13 @@ status() {
   fi
 
   if (( blanked )); then
-    printf 'Panel blanked:    yes (restored when the lid opens)\n'
+    blanked_monitor=""
+    [[ -r $blanked_flag ]] && blanked_monitor=$(<"$blanked_flag")
+    if valid_monitor "$blanked_monitor"; then
+      printf 'Panel blanked:    yes (%s; restored when the lid opens)\n' "$blanked_monitor"
+    else
+      printf 'Panel blanked:    yes (restored when the lid opens)\n'
+    fi
   fi
 
   if (( flag )) && ! (( inhibited )); then

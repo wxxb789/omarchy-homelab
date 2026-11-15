@@ -7,10 +7,15 @@
 
 set -eu
 
+if [[ -z ${HOME:-} || $HOME != /* || $HOME == / ]]; then
+  echo "error: HOME must be an absolute path under /." >&2
+  exit 1
+fi
+
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 bin_dir="$HOME/.local/bin"
-unit_dir="$HOME/.config/systemd/user"
-state_dir="$HOME/.local/state/homelab"
+unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/homelab"
 plugin_id="io.github.wxxb789.homelab"
 plugin_dir="$HOME/.config/omarchy/plugins/$plugin_id"
 
@@ -57,6 +62,13 @@ link() {
   fi
 
   ln -sfn "$src" "$dst"
+}
+
+remove_link() {
+  local dst="$1"
+  if [[ -L $dst && $(readlink -f -- "$dst") == "$repo_dir"/* ]]; then
+    rm -f -- "$dst"
+  fi
 }
 
 install_plugin() {
@@ -106,7 +118,7 @@ install_plugin() {
 }
 
 refuse_root() {
-  if (( EUID == 0 )); then
+  if (( ${EUID:-$(id -u)} == 0 )); then
     echo "error: run install.sh as your desktop user, not with sudo or as root." >&2
     exit 1
   fi
@@ -116,7 +128,7 @@ uninstall() {
   refuse_root
   # Stop the watcher first: its ExecStopPost restores DPMS while Hyprland is
   # still alive. Then release the inhibitor, which may suspend a closed lid.
-  systemctl --user disable --now homelab-lid.service >/dev/null 2>&1 || true
+  timeout 30 systemctl --user disable --now homelab-lid.service >/dev/null 2>&1 || true
 
   if [[ -f $state_dir/lid-blanked ]]; then
     "$bin_dir/homelab-lid-watch" --restore >/dev/null 2>&1 || true
@@ -125,18 +137,25 @@ uninstall() {
   if omarchy-hw-laptop-closed >/dev/null 2>&1; then
     echo "warning: the lid is closed; releasing the inhibitor may suspend the machine." >&2
   fi
-  systemctl --user disable --now homelab-inhibit.service >/dev/null 2>&1 || true
+  timeout 30 systemctl --user disable --now homelab-inhibit.service >/dev/null 2>&1 || true
 
   if command -v omarchy >/dev/null 2>&1; then
     omarchy plugin remove "$plugin_id" --yes >/dev/null 2>&1 || true
   fi
-  rm -rf "$plugin_dir"
+  case "$plugin_dir" in
+    "$HOME"/.config/omarchy/plugins/*) rm -rf -- "$plugin_dir" ;;
+    *)
+      echo "warning: refusing to remove unexpected plugin path: $plugin_dir" >&2
+      ;;
+  esac
 
-  rm -f "$bin_dir/homelab" "$bin_dir/homelab-lid-watch"
-  rm -f "$unit_dir/homelab-lid.service" "$unit_dir/homelab-inhibit.service"
+  remove_link "$bin_dir/homelab"
+  remove_link "$bin_dir/homelab-lid-watch"
+  remove_link "$unit_dir/homelab-lid.service"
+  remove_link "$unit_dir/homelab-inhibit.service"
   rm -f "$state_dir/enabled" "$state_dir/lid-blanked" "$state_dir/lock"
 
-  systemctl --user daemon-reload
+  timeout 20 systemctl --user daemon-reload
 
   echo "HomeLab mode helpers removed. Laptop mode is active."
   echo "The checkout at $repo_dir was not touched."
@@ -159,7 +178,7 @@ case "${1:-install}" in
 esac
 
 refuse_root
-require hyprctl jq systemctl loginctl flock timeout omarchy-hw-laptop omarchy-hw-laptop-closed omarchy-hyprland-monitor-laptop
+require hyprctl jq systemctl systemd-inhibit loginctl flock timeout omarchy-hw-laptop omarchy-hw-laptop-closed omarchy-hyprland-monitor-laptop
 
 chmod +x "$repo_dir/bin/homelab" "$repo_dir/bin/homelab-lid-watch"
 
@@ -170,18 +189,26 @@ link "$repo_dir/systemd/user/homelab-lid.service" "$unit_dir/homelab-lid.service
 
 mkdir -p "$state_dir"
 
-systemctl --user daemon-reload
-systemctl --user enable homelab-inhibit.service >/dev/null
-systemctl --user enable homelab-lid.service >/dev/null
-systemctl --user restart homelab-lid.service >/dev/null 2>&1 || true
+timeout 20 systemctl --user daemon-reload
+if ! timeout 20 systemctl --user enable homelab-inhibit.service homelab-lid.service; then
+  echo "warning: could not enable the HomeLab user units." >&2
+fi
+timeout 20 systemctl --user reset-failed homelab-lid.service homelab-inhibit.service >/dev/null 2>&1 || true
+if [[ -f $state_dir/enabled ]]; then
+  if ! timeout 20 systemctl --user start homelab-lid.service; then
+    echo "warning: HomeLab is on, but the lid watcher did not start." >&2
+  fi
+fi
 
 # A lingering user manager is what lets the inhibitor start at boot, before
 # anyone logs in. It is already enabled on most Omarchy installs.
-if [[ $(loginctl show-user "$USER" -p Linger --value 2>/dev/null || true) != yes ]]; then
-  if loginctl enable-linger "$USER" >/dev/null 2>&1; then
-    echo "Enabled systemd lingering for $USER (HomeLab mode survives reboot)."
+user_name=$(id -un)
+linger=$(timeout 5 loginctl show-user "$user_name" -p Linger --value 2>/dev/null || true)
+if [[ $linger != yes ]]; then
+  if timeout 10 loginctl --no-ask-password enable-linger "$user_name" >/dev/null 2>&1; then
+    echo "Enabled systemd lingering for $user_name (HomeLab mode survives reboot)."
   else
-    echo "warning: could not enable lingering for $USER." >&2
+    echo "warning: could not enable lingering for $user_name." >&2
     echo "         HomeLab mode will start at boot only after you log in." >&2
   fi
 fi
