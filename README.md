@@ -7,10 +7,10 @@ Two power modes for an Omarchy laptop:
 | **Laptop** (default) | Omarchy locks the session and logind suspends. | Normal use. |
 | **HomeLab** | The internal panel blanks and Omarchy's lid handling still runs (a lock on an undocked laptop), but an inhibitor stops logind from suspending. The machine keeps running. | The panel comes back on and the keyboard works as usual. |
 
-HomeLab mode does **not** disable the internal output or any input device. It
-stops logind from acting on the lid switch, and turns the internal panel's DPMS
-off while the lid is shut. Everything keeps running: network, disks,
-containers, downloads, SSH, and so on.
+HomeLab mode itself does **not** disable the internal output or any input
+device. It stops logind from acting on the lid switch, and turns the internal
+panel's DPMS off while the lid is shut. Everything keeps running: network,
+disks, containers, downloads, SSH, and so on.
 
 ## Install
 
@@ -21,11 +21,12 @@ cd ~/repos/omarchy-homelab
 ```
 
 `install.sh` symlinks the commands and units from the checkout into
-`~/.local/bin` and `~/.config/systemd/user`, then enables the user units. It
-also installs an Omarchy bar widget under `~/.config/omarchy/plugins` and
-enables it on the right side of the bar. The checkout stays the source of
-truth for the commands and units, so editing a file here changes what the
-machine runs. Laptop mode remains the default.
+`~/.local/bin` and `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user`, then
+enables the user units. It also copies an Omarchy bar widget under
+`~/.config/omarchy/plugins` and enables it on the right side of the bar. The
+checkout stays the source of truth for the commands and units, so editing those
+changes what the machine runs; the widget and manifest are copied, so rerun
+`./install.sh` after editing them. Laptop mode remains the default.
 
 Requirements: Omarchy (Hyprland), `jq`, and systemd. No root is needed.
 
@@ -62,7 +63,8 @@ omarchy-shell io.github.wxxb789.homelab toggle
 omarchy-shell io.github.wxxb789.homelab refresh
 ```
 
-If the icon is missing after an install, run `omarchy restart shell` once.
+If the icon is missing after an install, see
+[Bar icon missing](docs/troubleshooting.md#bar-icon-missing).
 
 ## How it works
 
@@ -89,35 +91,70 @@ If the icon is missing after an install, run `omarchy restart shell` once.
 - **Manual suspend still works.** HomeLab mode only inhibits the lid switch, not
   `sleep`, so choosing Suspend from the power menu still suspends the machine.
 
+## Why not just logind.conf?
+
+`HandleLidSwitch=ignore` in `/etc/systemd/logind.conf` is system-wide, needs
+root, and has no toggle, no panel blanking, and no status. HomeLab mode is a
+per-user switch: turn it on when the machine must keep running, and
+`homelab off` returns the lid to Omarchy's normal suspend behavior without
+editing root-owned configuration.
+
+## Safety
+
+HomeLab mode keeps a closed laptop running, with the lid blocking most of its
+airflow.
+
+- Put it on a hard, ventilated surface. Do not use it on a bed, cushion, or
+  other soft surface.
+- Prefer AC power. A closed laptop on battery will drain, and the battery can
+  reach critical while you are not looking.
+- Use it for timed jobs, not as a permanent server. Check the temperature.
+- Do not rely on HomeLab mode to keep the machine alive at critical battery;
+  logind, UPower, or firmware may suspend, hibernate, or power off.
+- Never run it closed in a bag, backpack, or other enclosed space.
+
 ## Notes
 
-- A lid close in HomeLab mode still locks the screen (Omarchy's default). If you
-  prefer no lock, rebind `switch:on:Lid Switch` in `~/.config/hypr/bindings.lua`
-  to a wrapper that skips `omarchy-system-lid-close` when the mode flag exists.
-- External monitors keep working as before. When an external display is active
-  and the lid is closed, Omarchy's clamshell logic disables the internal output;
-  the lid watcher leaves that alone.
-- `homelab off` while the lid is already closed releases the inhibitor, and
-  logind rechecks a closed lid immediately: the machine may suspend right away.
-  The command warns before it does this. If the machine stays awake, run
-  `systemctl suspend` to suspend now.
+- A lid close in HomeLab mode still locks the screen on an undocked laptop.
+  With an external monitor attached, Omarchy's clamshell path may skip the
+  lock. To skip it in every case, rebind `switch:on:Lid Switch` in
+  `~/.config/hypr/bindings.lua` to a wrapper that skips
+  `omarchy-system-lid-close` when the mode flag exists.
+- External monitors keep working. When one is active and the lid is closed,
+  Omarchy may disable the internal output; the lid watcher leaves that alone.
+  See [External monitor or clamshell](docs/troubleshooting.md#external-monitor-or-clamshell).
+- `homelab off` with the lid already closed releases the inhibitor, and logind
+  may suspend immediately. Run it with the lid open, or expect an SSH session
+  to drop. See [`homelab off` disconnects SSH](docs/troubleshooting.md#homelab-off-disconnects-ssh).
 - Boot persistence needs `Linger=yes` for the user (the installer tries to
   enable it). Without lingering, the inhibitor starts after login instead of at
-  boot. logind holds lid events for up to 30 seconds after startup
-  (`HoldoffTimeoutSec`), which gives the lingering user manager time to take the
-  inhibitor.
-- The lid watcher needs a live Hyprland session to blank the panel. With the lid
-  shut and no login, the inhibitor keeps the machine running but the panel may
-  stay lit; the watcher starts when the graphical session starts.
-- A closed laptop has little airflow. Use HomeLab mode on a hard surface with
-  ventilation, preferably on AC, and do not leave it running in a bag.
-- State follows `XDG_STATE_HOME` (default `~/.local/state`). Commands live in
-  `~/.local/bin`; the user units follow `XDG_CONFIG_HOME` (default
-  `~/.config/systemd/user`); the bar widget lives under
-  `~/.config/omarchy/plugins`, matching Omarchy's own plugin tools.
+  boot. logind's default `HoldoffTimeoutSec=30s` delays lid handling after
+  startup, which gives the lingering user manager time to take the inhibitor.
+  See [Closed-lid boot before login](docs/troubleshooting.md#closed-lid-boot-before-login).
+- The lid watcher needs a live Hyprland session. With the lid shut and no
+  login, the inhibitor keeps the machine running but the panel may stay lit;
+  the watcher starts when the graphical session starts. See
+  [Panel stays lit or blanked](docs/troubleshooting.md#panel-stays-lit-or-blanked).
+- State follows `XDG_STATE_HOME` (default `~/.local/state`). Commands are fixed
+  at `~/.local/bin`; the user units follow `XDG_CONFIG_HOME` (default
+  `~/.config/systemd/user`); the bar widget is fixed under
+  `~/.config/omarchy/plugins`. See [XDG paths](docs/troubleshooting.md#xdg-paths).
 - Tested on Omarchy 4.5 with a ThinkPad (internal output `eDP-1`). Some
   ThinkPads lose the internal keyboard after a lid-open without suspend; a
-  suspend/resume cycle resets the controller.
+  suspend/resume cycle resets the controller. See
+  [ThinkPad keyboard dead after lid open](docs/troubleshooting.md#thinkpad-keyboard-dead-after-lid-open).
+
+## Troubleshooting
+
+Start with `homelab status`. For missing bar icons, inhibitor failures, panel
+or DPMS problems, SSH drops on `homelab off`, closed-lid boots, clamshell
+setups, and uninstall checks, see
+[docs/troubleshooting.md](docs/troubleshooting.md).
+
+## Development
+
+Tests belong in `tests/`. The test harness is developed separately; once
+present, run `make check`.
 
 ## Uninstall
 
@@ -125,9 +162,12 @@ If the icon is missing after an install, run `omarchy restart shell` once.
 ./install.sh --uninstall
 ```
 
-This stops and disables the units, removes the symlinks and the bar widget,
-clears the mode flag, and returns the machine to Laptop mode. The checkout is
-not touched.
+Open the lid first: releasing the inhibitor with a closed lid can suspend the
+machine immediately. The uninstaller stops and disables the units, removes the
+symlinks and the bar widget, clears the mode flag, and returns the machine to
+Laptop mode. The checkout is not touched. See
+[Uninstall and verify](docs/troubleshooting.md#uninstall-and-verify) for the
+verification commands.
 
 ## Layout
 
@@ -137,5 +177,11 @@ bin/homelab-lid-watch     lid watcher / DPMS handling
 manifest.json             Omarchy bar-widget manifest
 plugin/BarWidget.qml      bar toggle and mode indicator
 systemd/user/             user units
+docs/troubleshooting.md   failure modes and fixes
+LICENSE                   MIT license
 install.sh                symlink + enable helper
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
