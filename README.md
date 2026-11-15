@@ -64,11 +64,11 @@ exposes the same data under `power`.
 ## Bar icon
 
 The installer adds a **HomeLab** widget to the Omarchy bar. It shows a dim
-laptop in Laptop mode and a lit server rack in HomeLab mode. Left-click
-toggles the mode; hover shows what a click will do. While HomeLab is on, it
-polls `homelab status --json` and adds the verified lock, deadline, battery,
-temperature, and any inconsistency to the tooltip. The widget watches the same
-mode flag as the CLI, so `homelab on/off` from a terminal, SSH, or a keybinding
+laptop in Laptop mode and a lit server rack in HomeLab mode. Left-click opens
+a control panel with **1h / 3h / 8h** holds, open-ended mode, and turn-off;
+right-click toggles the mode quickly. Hover shows the verified lock, deadline,
+battery, temperature, and any inconsistency. The widget watches the same mode
+flag as the CLI, so `homelab on/off` from a terminal, SSH, or a keybinding
 updates the bar immediately.
 
 The widget is also scriptable through Omarchy's shell IPC:
