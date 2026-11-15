@@ -52,12 +52,21 @@ new_sandbox() {
   export OMARCHY_ACPI_LID_PATH="$FAKE_STATE/acpi-lid"
   export PATH="$test_tmp/bin:$PATH"
 
+  # Deterministic defaults for the knobs the fakes understand.
+  export FAKE_LAPTOP=yes
+  export FAKE_LINGER=yes
+  export FAKE_LOCK=present
+  export FAKE_MAINPID=4242
+  export FAKE_MONITOR=${FAKE_MONITOR:-eDP-1}
+  unset FAKE_DPMS_ON FAKE_DPMS_OFF FAKE_HYPR
+
   unset HYPRLAND_INSTANCE_SIGNATURE WAYLAND_DISPLAY
 
   mkdir -p "$HOME" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" \
     "$FAKE_STATE" "$FAKE_LOG_DIR" "$test_tmp/bin"
 
-  printf '[{"name":"eDP-1","disabled":false}]\n' >"$FAKE_STATE/monitors.json"
+  printf '%s\n' "$FAKE_MONITOR" >"$FAKE_STATE/internal-monitor"
+  reset_fake_monitors
   set_lid open
 
   install_fakes
@@ -80,61 +89,231 @@ state="$FAKE_STATE/systemd"
 mkdir -p "$state"
 
 action=""
-unit=""
 now=0
+property=""
+property_next=0
+units=()
+
 for arg in "$@"; do
   case $arg in
-    --user|--no-pager|--quiet) ;;
+    --user|--no-pager|--quiet|--value) ;;
     --now) now=1 ;;
+    -p) property_next=1 ;;
     -*) ;;
     *)
       if [[ -z $action ]]; then
         action=$arg
-      elif [[ -z $unit ]]; then
-        unit=$arg
+      elif (( property_next )); then
+        property=$arg
+        property_next=0
+      else
+        units+=("$arg")
       fi
       ;;
   esac
 done
 
+unit_active() { [[ -f $state/$1.active ]]; }
+unit_enabled() { [[ -f $state/$1.enabled ]]; }
+unit_failed() { [[ -f $state/$1.failed ]]; }
+
+start_unit() {
+  local unit=$1
+
+  if [[ -f $FAKE_STATE/fail-start-$unit ]]; then
+    : >"$state/$unit.failed"
+    return 1
+  fi
+  : >"$state/$unit.active"
+  printf '%s\n' "${FAKE_MAINPID:-4242}" >"$state/$unit.mainpid"
+}
+
+stop_unit() {
+  local unit=$1
+
+  if [[ -f $FAKE_STATE/fail-stop-$unit ]]; then
+    return 1
+  fi
+  rm -f "$state/$unit.active" "$state/$unit.mainpid"
+}
+
+restart_unit() {
+  local unit=$1
+
+  stop_unit "$unit" || return 1
+  start_unit "$unit"
+}
+
 case $action in
-  enable)
-    touch "$state/$unit.enabled"
-    if (( now )); then touch "$state/$unit.active"; fi
-    ;;
-  disable)
-    rm -f "$state/$unit.enabled"
-    if (( now )); then rm -f "$state/$unit.active"; fi
-    ;;
   start)
-    if [[ -f $FAKE_STATE/fail-start-$unit ]]; then exit 1; fi
-    touch "$state/$unit.active"
+    rc=0
+    for unit in "${units[@]}"; do
+      if ! start_unit "$unit"; then
+        rc=1
+      fi
+    done
+    exit "$rc"
     ;;
   stop)
-    rm -f "$state/$unit.active"
+    rc=0
+    for unit in "${units[@]}"; do
+      if ! stop_unit "$unit"; then
+        rc=1
+      fi
+    done
+    exit "$rc"
     ;;
   restart)
-    if [[ -f $FAKE_STATE/fail-start-$unit ]]; then exit 1; fi
-    touch "$state/$unit.active"
+    rc=0
+    for unit in "${units[@]}"; do
+      if ! restart_unit "$unit"; then
+        rc=1
+      fi
+    done
+    exit "$rc"
+    ;;
+  try-restart)
+    rc=0
+    for unit in "${units[@]}"; do
+      if unit_active "$unit"; then
+        if ! restart_unit "$unit"; then
+          rc=1
+        fi
+      fi
+    done
+    exit "$rc"
+    ;;
+  enable)
+    rc=0
+    for unit in "${units[@]}"; do
+      : >"$state/$unit.enabled"
+      if (( now )) && ! start_unit "$unit"; then
+        rc=1
+      fi
+    done
+    exit "$rc"
+    ;;
+  disable)
+    rc=0
+    for unit in "${units[@]}"; do
+      rm -f "$state/$unit.enabled"
+      if (( now )) && ! stop_unit "$unit"; then
+        rc=1
+      fi
+    done
+    exit "$rc"
+    ;;
+  reset-failed)
+    for unit in "${units[@]}"; do
+      rm -f "$state/$unit.failed"
+    done
+    exit 0
     ;;
   is-active)
-    [[ -f $state/$unit.active ]] && exit 0 || exit 3
+    rc=0
+    for unit in "${units[@]}"; do
+      if ! unit_active "$unit"; then
+        rc=3
+      fi
+    done
+    exit "$rc"
     ;;
   is-enabled)
-    [[ -f $state/$unit.enabled ]] && exit 0 || exit 1
+    rc=0
+    for unit in "${units[@]}"; do
+      if ! unit_enabled "$unit"; then
+        rc=1
+      fi
+    done
+    exit "$rc"
+    ;;
+  show)
+    if [[ $property == MainPID ]]; then
+      if (( ${#units[@]} > 0 )) && unit_active "${units[0]}" &&
+        [[ -f $state/${units[0]}.mainpid ]]; then
+        cat "$state/${units[0]}.mainpid"
+      else
+        printf '0\n'
+      fi
+    fi
+    exit 0
     ;;
   status)
-    if [[ -f $state/$unit.active ]]; then
+    unit=${units[0]:-}
+    if unit_active "$unit"; then
       printf 'active\n'
+      exit 0
+    elif unit_failed "$unit"; then
+      printf 'failed\n'
+      exit 3
     else
       printf 'inactive\n'
       exit 3
     fi
     ;;
-  daemon-reload|daemon-reexec) ;;
+  daemon-reload|daemon-reexec)
+    exit 0
+    ;;
+  *)
+    printf 'systemctl fake: unsupported action: %s\n' "${action:-<none>}" >&2
+    exit 1
+    ;;
+esac
+EOF
+
+  write_fake systemd-inhibit <<'EOF'
+#!/bin/bash
+set -euo pipefail
+printf 'systemd-inhibit %s\n' "$*" >>"$FAKE_LOG_DIR/systemd-inhibit.log"
+
+state="$FAKE_STATE/systemd"
+pid_file="$state/homelab-inhibit.service.mainpid"
+active_file="$state/homelab-inhibit.service.active"
+count_file="$FAKE_STATE/systemd-inhibit-list-count"
+
+pid=0
+if [[ -f $active_file && -f $pid_file ]]; then
+  pid=$(<"$pid_file")
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || pid=0
+fi
+
+locked=0
+case ${FAKE_LOCK:-present} in
+  present) locked=1 ;;
+  missing) locked=0 ;;
+  delayed:*)
+    delay=${FAKE_LOCK#delayed:}
+    count=0
+    [[ -r $count_file ]] && count=$(<"$count_file")
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$count_file"
+    if (( count > delay )); then
+      locked=1
+    fi
+    ;;
+  *) locked=0 ;;
 esac
 
-exit 0
+if (( pid == 0 )); then
+  locked=0
+fi
+
+if [[ " $* " != *" --list "* ]]; then
+  exit 0
+fi
+
+if [[ " $* " == *" --json=short "* || " $* " == *" --json "* ]]; then
+  if (( locked )); then
+    jq -n --argjson pid "$pid" \
+      '[{what:"handle-lid-switch",who:"HomeLab",why:"HomeLab mode: keep the machine running with the lid closed",mode:"block",uid:1000,pid:$pid}]'
+  else
+    printf '[]\n'
+  fi
+else
+  if (( locked )); then
+    printf 'HomeLab 1000 user %s systemd-inhibit handle-lid-switch HomeLab mode: keep the machine running with the lid closed block\n' "$pid"
+  fi
+fi
 EOF
 
   write_fake loginctl <<'EOF'
@@ -154,8 +333,53 @@ EOF
 set -euo pipefail
 printf 'hyprctl %s\n' "$*" >>"$FAKE_LOG_DIR/hyprctl.log"
 
+if [[ ${FAKE_HYPR:-up} == down ]]; then
+  exit 1
+fi
+
 case ${1:-} in
-  monitors) cat "$FAKE_STATE/monitors.json" ;;
+  monitors)
+    cat "$FAKE_STATE/monitors.json"
+    ;;
+  dispatch)
+    shift
+    request="$*"
+    tmp="$FAKE_STATE/monitors.json.$$"
+
+    if [[ $request == *'action = "off"'* ]]; then
+      [[ ${FAKE_DPMS_OFF:-ok} == fail ]] && exit 1
+      monitor=""
+      if [[ $request =~ monitor\ =\ \"([^\"]+)\" ]]; then
+        monitor=${BASH_REMATCH[1]}
+      fi
+      if [[ -n $monitor ]] &&
+        jq -e --arg m "$monitor" 'any(.[]; .name == $m)' \
+          "$FAKE_STATE/monitors.json" >/dev/null; then
+        jq --arg m "$monitor" \
+          'map(if .name == $m then .dpmsStatus = false else . end)' \
+          "$FAKE_STATE/monitors.json" >"$tmp"
+      else
+        jq 'map(.dpmsStatus = false)' "$FAKE_STATE/monitors.json" >"$tmp"
+      fi
+      mv "$tmp" "$FAKE_STATE/monitors.json"
+    elif [[ $request == *'action = "on"'* ]]; then
+      [[ ${FAKE_DPMS_ON:-ok} == fail ]] && exit 1
+      monitor=""
+      if [[ $request =~ monitor\ =\ \"([^\"]+)\" ]]; then
+        monitor=${BASH_REMATCH[1]}
+      fi
+      if [[ -n $monitor ]] &&
+        jq -e --arg m "$monitor" 'any(.[]; .name == $m)' \
+          "$FAKE_STATE/monitors.json" >/dev/null; then
+        jq --arg m "$monitor" \
+          'map(if .name == $m then .dpmsStatus = true else . end)' \
+          "$FAKE_STATE/monitors.json" >"$tmp"
+      else
+        jq 'map(.dpmsStatus = true)' "$FAKE_STATE/monitors.json" >"$tmp"
+      fi
+      mv "$tmp" "$FAKE_STATE/monitors.json"
+    fi
+    ;;
 esac
 
 exit 0
@@ -166,6 +390,13 @@ EOF
 set -euo pipefail
 printf 'notify-send %s\n' "$*" >>"$FAKE_LOG_DIR/notify-send.log"
 exit 0
+EOF
+
+  write_fake omarchy-hw-laptop <<'EOF'
+#!/bin/bash
+set -euo pipefail
+printf 'omarchy-hw-laptop\n' >>"$FAKE_LOG_DIR/laptop.log"
+[[ ${FAKE_LAPTOP:-yes} == yes ]]
 EOF
 
   write_fake omarchy-hw-laptop-closed <<'EOF'
@@ -180,12 +411,19 @@ EOF
 #!/bin/bash
 set -euo pipefail
 printf 'omarchy-hyprland-monitor-laptop\n' >>"$FAKE_LOG_DIR/monitor.log"
-printf 'eDP-1\n'
+if [[ -n ${FAKE_MONITOR:-} ]]; then
+  printf '%s\n' "$FAKE_MONITOR"
+elif [[ -r $FAKE_STATE/internal-monitor ]]; then
+  cat "$FAKE_STATE/internal-monitor"
+else
+  printf 'eDP-1\n'
+fi
 EOF
 
-  # Keep the watcher loop fast and deterministic. The loop only depends on
-  # tick counts, not on wall-clock time, so shortening sleep does not change
-  # the behavior under test.
+  # Keep the watcher loop fast and deterministic. The product uses sleep for
+  # both its 2-second loop and its 0.1-second restore retries; shortening every
+  # sleep keeps the whole suite quick. Tests must use wait_for helpers rather
+  # than assuming a particular number of ticks.
   write_fake sleep <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -202,14 +440,87 @@ set_lid() {
   printf 'state:      %s\n' "$state" >"$FAKE_STATE/acpi-lid/LID0/state"
 }
 
+fake_monitor_name() {
+  if [[ -n ${FAKE_MONITOR:-} ]]; then
+    printf '%s\n' "$FAKE_MONITOR"
+  elif [[ -r $FAKE_STATE/internal-monitor ]]; then
+    cat "$FAKE_STATE/internal-monitor"
+  else
+    printf 'eDP-1\n'
+  fi
+}
+
+reset_fake_monitors() {
+  local name
+
+  name=$(fake_monitor_name)
+  jq -n --arg name "$name" \
+    '[{name:$name,disabled:false,dpmsStatus:true}]' \
+    >"$FAKE_STATE/monitors.json"
+}
+
+set_monitor_name() {
+  export FAKE_MONITOR=$1
+  printf '%s\n' "$FAKE_MONITOR" >"$FAKE_STATE/internal-monitor"
+  reset_fake_monitors
+}
+
 set_internal_disabled() {
   local disabled=$1
+  local name tmp
 
-  printf '[{"name":"eDP-1","disabled":%s}]\n' "$disabled" >"$FAKE_STATE/monitors.json"
+  name=$(fake_monitor_name)
+  tmp=$(mktemp "$FAKE_STATE/monitors.XXXXXX")
+  jq --arg name "$name" --argjson disabled "$disabled" '
+    if any(.[]; .name == $name) then
+      map(if .name == $name then .disabled = $disabled else . end)
+    else
+      . + [{name:$name, disabled:$disabled, dpmsStatus:true}]
+    end' "$FAKE_STATE/monitors.json" >"$tmp"
+  mv "$tmp" "$FAKE_STATE/monitors.json"
+}
+
+set_fake_dpms() {
+  local dpms=$1
+  local name tmp
+
+  name=$(fake_monitor_name)
+  tmp=$(mktemp "$FAKE_STATE/monitors.XXXXXX")
+  jq --arg name "$name" --argjson dpms "$dpms" '
+    if any(.[]; .name == $name) then
+      map(if .name == $name then .dpmsStatus = $dpms else . end)
+    else
+      . + [{name:$name, disabled:false, dpmsStatus:$dpms}]
+    end' "$FAKE_STATE/monitors.json" >"$tmp"
+  mv "$tmp" "$FAKE_STATE/monitors.json"
+}
+
+fake_dpms() {
+  local name
+
+  name=$(fake_monitor_name)
+  jq -r --arg name "$name" \
+    '.[] | select(.name == $name) | .dpmsStatus' \
+    "$FAKE_STATE/monitors.json" | head -n 1
 }
 
 track_pid() {
   test_pids+=("$1")
+}
+
+stop_pid() {
+  local pid=$1
+
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+pid_running() {
+  kill -0 "$1" 2>/dev/null
+}
+
+pid_not_running() {
+  ! pid_running "$1"
 }
 
 count_matches() {
@@ -249,6 +560,13 @@ wait_for_count() {
 
   wait_for "$wanted occurrence(s) of '$needle'" \
     count_at_least "$file" "$needle" "$wanted"
+}
+
+log_line_number() {
+  local file=$1 needle=$2
+
+  [[ -f $file ]] || return 0
+  awk -v needle="$needle" 'index($0, needle) { print NR; exit }' "$file"
 }
 
 assert_file() {
@@ -303,4 +621,34 @@ assert_line() {
   grep -Eq -- "$regex" <<<"$text" ||
     fail "$message (no line matching /$regex/)"
   ok "$message"
+}
+
+assert_before() {
+  local file=$1 first=$2 second=$3 message=$4
+  local first_line second_line
+
+  first_line=$(log_line_number "$file" "$first")
+  second_line=$(log_line_number "$file" "$second")
+
+  [[ -n $first_line ]] || fail "$message (missing '$first' in $file)"
+  [[ -n $second_line ]] || fail "$message (missing '$second' in $file)"
+  (( first_line < second_line )) ||
+    fail "$message ('$first' at line $first_line, '$second' at line $second_line)"
+  ok "$message"
+}
+
+assert_eq() {
+  local actual=$1 expected=$2 message=$3
+
+  [[ $actual == "$expected" ]] ||
+    fail "$message (expected '$expected', got '$actual')"
+  ok "$message"
+}
+
+assert_dpms() {
+  local expected=$1 message=$2
+  local actual
+
+  actual=$(fake_dpms)
+  assert_eq "$actual" "$expected" "$message"
 }
