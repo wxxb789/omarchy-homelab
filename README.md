@@ -38,7 +38,7 @@ homelab on --for 2h              # ...and turn off after two hours
 homelab on --until 23:00         # ...and turn off at 23:00 (tomorrow if past)
 homelab off       # Laptop mode: suspend on lid close
 homelab toggle    # Switch modes
-homelab status    # Show mode, lid state, inhibitor, display, deadline, boot
+homelab status    # Show mode, lid, inhibitor, display, power, deadline, boot
 homelab status --json --strict  # machine-readable, fail on inconsistency
 ```
 
@@ -47,12 +47,18 @@ also accepts `laptop`.
 
 `homelab status --json` prints a machine-readable snapshot (`schemaVersion: 1`)
 with the mode, lid, verified inhibitor lock, watcher, boot state, panel state,
-deadline, problems, and warnings. Add `--strict` to exit 1 when the mode is
-inconsistent; plain `status` stays useful to humans and exits 0.
+power/battery/temperature, deadline, problems, and warnings. Add `--strict` to
+exit 1 when the mode is inconsistent; plain `status` stays useful to humans and
+exits 0.
 
 The deadline is stored in the state directory and enforced by a user service,
 so a timed hold keeps counting across a reboot when systemd lingering is
 enabled. A new `homelab on` without `--for`/`--until` clears any old deadline.
+
+`homelab on` warns when it is running on battery, when the battery is at or
+below 20%, and when the CPU is at or above 90°C. `homelab status` shows AC or
+battery, charge, charge state, and the hottest thermal zone; `status --json`
+exposes the same data under `power`.
 
 ## Bar icon
 
