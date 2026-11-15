@@ -90,8 +90,16 @@ BarWidget {
 
   Timer {
     id: busyTimeout
-    interval: 5000
-    onTriggered: root.busy = false
+    // A mode change can wait on a 20-second systemd call. Do not declare
+    // failure while the CLI is still inside that window.
+    interval: 20000
+    onTriggered: {
+      root.busy = false
+      if (toggleProc.running) {
+        toggleProc.running = false
+        root.failed = true
+      }
+    }
   }
 
   Timer {

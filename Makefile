@@ -2,11 +2,6 @@ SHELL := /bin/bash
 
 SCRIPTS := bin/homelab bin/homelab-lid-watch bin/homelab-deadline install.sh $(wildcard tests/*.sh)
 
-# These findings pre-date the test branch and live in product files, which
-# this branch deliberately does not modify. Keep linting the product scripts;
-# only the known findings are excluded.
-PRODUCT_SHELLCHECK_EXCLUDES := SC2015,SC2034
-
 .PHONY: check syntax lint verify test
 
 check: syntax lint verify test
@@ -20,8 +15,7 @@ lint:
 	@echo "==> shellcheck"
 	@if command -v shellcheck >/dev/null 2>&1; then \
 		shellcheck -x $(wildcard tests/*.sh) && \
-		shellcheck --exclude=$(PRODUCT_SHELLCHECK_EXCLUDES) \
-			bin/homelab bin/homelab-lid-watch bin/homelab-deadline install.sh && \
+		shellcheck -x bin/homelab bin/homelab-lid-watch bin/homelab-deadline install.sh && \
 		echo "ok: shellcheck"; \
 	else \
 		echo "skip: shellcheck not installed"; \
