@@ -5,12 +5,12 @@ Two power modes for an Omarchy laptop:
 | Mode | Lid closed | Lid opened |
 | --- | --- | --- |
 | **Laptop** (default) | Omarchy locks the session and logind suspends. | Normal use. |
-| **HomeLab** | The session locks and the internal panel blanks, but an inhibitor stops logind from suspending. The machine keeps running. | The panel comes back on and the keyboard works as usual. |
+| **HomeLab** | The internal panel blanks and Omarchy's lid handling still runs (a lock on an undocked laptop), but an inhibitor stops logind from suspending. The machine keeps running. | The panel comes back on and the keyboard works as usual. |
 
-HomeLab mode does **not** disable the display, keyboard, or any other device.
-It only stops logind from acting on the lid switch, and turns the internal
-panel's DPMS off while the lid is shut. Everything keeps running: network,
-disks, containers, downloads, SSH, and so on.
+HomeLab mode does **not** disable the internal output or any input device. It
+stops logind from acting on the lid switch, and turns the internal panel's DPMS
+off while the lid is shut. Everything keeps running: network, disks,
+containers, downloads, SSH, and so on.
 
 ## Install
 
@@ -63,13 +63,16 @@ If the icon is missing after an install, run `omarchy restart shell` once.
 - **`homelab-inhibit.service`** (user unit, enabled at `default.target`) runs
   `systemd-inhibit --what=handle-lid-switch ... sleep infinity`. While that
   inhibitor is held, logind ignores the lid switch. The unit starts when
-  `~/.local/state/homelab/enabled` exists. With systemd lingering enabled, it
+  `$XDG_STATE_HOME/homelab/enabled` exists (default
+  `~/.local/state/homelab/enabled`). With systemd lingering enabled, it
   starts at boot before login, so a reboot with the lid shut does not suspend
   the machine.
-- **`homelab-lid.service`** (user unit, part of `graphical-session.target`) polls
-  the lid and, in HomeLab mode, sends Hyprland a DPMS-off for the internal
-  output (`eDP-1`, `LVDS-1`, etc.). When the lid opens, it sends DPMS-on and
-  removes its state flag. Input devices are never touched.
+- **`homelab-lid.service`** (user unit, part of `graphical-session.target`) is
+  started only while HomeLab mode is on. It polls the lid and sends Hyprland a
+  DPMS-off for the internal output (`eDP-1`, `LVDS-1`, etc.). When the lid
+  opens, it sends DPMS-on and removes its state flag. Stopping the service
+  restores DPMS through `ExecStopPost`, so `homelab off` does not leave the
+  panel blanked. Input devices are never touched.
 - **Omarchy's stock lid handling is left in place.** The compositor's lid-close
   binding still locks the session and applies clamshell handling when an
   external monitor is attached. That is why opening the lid shows the lock
@@ -85,14 +88,27 @@ If the icon is missing after an install, run `omarchy restart shell` once.
 - External monitors keep working as before. When an external display is active
   and the lid is closed, Omarchy's clamshell logic disables the internal output;
   the lid watcher leaves that alone.
-- `homelab off` while the lid is already closed cannot generate a new lid event.
-  The machine may stay awake until the next lid event; run `systemctl suspend`
-  to suspend immediately.
+- `homelab off` while the lid is already closed releases the inhibitor, and
+  logind rechecks a closed lid immediately: the machine may suspend right away.
+  The command warns before it does this. If the machine stays awake, run
+  `systemctl suspend` to suspend now.
 - Boot persistence needs `Linger=yes` for the user (the installer tries to
   enable it). Without lingering, the inhibitor starts after login instead of at
-  boot. logind holds lid events for a few seconds after startup, which gives the
-  lingering user manager time to take the inhibitor.
-- Tested on Omarchy 4.5 with a ThinkPad (internal output `eDP-1`).
+  boot. logind holds lid events for up to 30 seconds after startup
+  (`HoldoffTimeoutSec`), which gives the lingering user manager time to take the
+  inhibitor.
+- The lid watcher needs a live Hyprland session to blank the panel. With the lid
+  shut and no login, the inhibitor keeps the machine running but the panel may
+  stay lit; the watcher starts when the graphical session starts.
+- A closed laptop has little airflow. Use HomeLab mode on a hard surface with
+  ventilation, preferably on AC, and do not leave it running in a bag.
+- State follows `XDG_STATE_HOME` (default `~/.local/state`). Commands live in
+  `~/.local/bin`; the user units follow `XDG_CONFIG_HOME` (default
+  `~/.config/systemd/user`); the bar widget lives under
+  `~/.config/omarchy/plugins`, matching Omarchy's own plugin tools.
+- Tested on Omarchy 4.5 with a ThinkPad (internal output `eDP-1`). Some
+  ThinkPads lose the internal keyboard after a lid-open without suspend; a
+  suspend/resume cycle resets the controller.
 
 ## Uninstall
 
