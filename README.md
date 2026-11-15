@@ -34,9 +34,11 @@ Requirements: Omarchy (Hyprland), `jq`, and systemd. No root is needed.
 
 ```bash
 homelab on        # HomeLab mode: keep running when the lid closes
+homelab on --for 2h              # ...and turn off after two hours
+homelab on --until 23:00         # ...and turn off at 23:00 (tomorrow if past)
 homelab off       # Laptop mode: suspend on lid close
 homelab toggle    # Switch modes
-homelab status    # Show mode, lid state, inhibitor, display, boot persistence
+homelab status    # Show mode, lid state, inhibitor, display, deadline, boot
 homelab status --json --strict  # machine-readable, fail on inconsistency
 ```
 
@@ -45,8 +47,12 @@ also accepts `laptop`.
 
 `homelab status --json` prints a machine-readable snapshot (`schemaVersion: 1`)
 with the mode, lid, verified inhibitor lock, watcher, boot state, panel state,
-problems, and warnings. Add `--strict` to exit 1 when the mode is inconsistent;
-plain `status` stays useful to humans and exits 0.
+deadline, problems, and warnings. Add `--strict` to exit 1 when the mode is
+inconsistent; plain `status` stays useful to humans and exits 0.
+
+The deadline is stored in the state directory and enforced by a user service,
+so a timed hold keeps counting across a reboot when systemd lingering is
+enabled. A new `homelab on` without `--for`/`--until` clears any old deadline.
 
 ## Bar icon
 
@@ -81,6 +87,10 @@ If the icon is missing after an install, see
   opens, it sends DPMS-on and removes its state flag. Stopping the service
   restores DPMS through `ExecStopPost`, so `homelab off` does not leave the
   panel blanked. Input devices are never touched.
+- **`homelab-deadline.service`** (user unit, enabled at `default.target`) sleeps
+  until the epoch in `$XDG_STATE_HOME/homelab/deadline`, then calls
+  `homelab off`. It is enabled only while a deadline exists; a normal
+  `homelab off` stops it and removes the deadline.
 - **Omarchy's stock lid handling is left in place.** The compositor's lid-close
   binding still locks the session and applies clamshell handling when an
   external monitor is attached. That is why opening the lid shows the lock
@@ -108,7 +118,8 @@ airflow.
   other soft surface.
 - Prefer AC power. A closed laptop on battery will drain, and the battery can
   reach critical while you are not looking.
-- Use it for timed jobs, not as a permanent server. Check the temperature.
+- Use it for timed jobs, not as a permanent server. Prefer
+  `homelab on --for 2h` over an open-ended hold, and check the temperature.
 - Do not rely on HomeLab mode to keep the machine alive at critical battery;
   logind, UPower, or firmware may suspend, hibernate, or power off.
 - Never run it closed in a bag, backpack, or other enclosed space.
@@ -181,6 +192,7 @@ verification commands.
 ```
 bin/homelab               mode switch and status
 bin/homelab-lid-watch     lid watcher / DPMS handling
+bin/homelab-deadline      deadline sleep and turn-off helper
 manifest.json             Omarchy bar-widget manifest
 plugin/BarWidget.qml      bar toggle and mode indicator
 systemd/user/             user units
