@@ -20,6 +20,9 @@ deadline_unit="homelab-deadline.service"
 deadline_epoch=""
 deadline_label=""
 
+power_supply_path="${HOMELAB_POWER_SUPPLY_PATH:-/sys/class/power_supply}"
+thermal_path="${HOMELAB_THERMAL_PATH:-/sys/class/thermal}"
+
 if (( ${EUID:-$(id -u)} == 0 )); then
   echo "homelab: run this as your desktop user, not with sudo or as root." >&2
   exit 1
@@ -32,6 +35,51 @@ fi
 
 lid_closed() {
   timeout 3 omarchy-hw-laptop-closed >/dev/null 2>&1
+}
+
+ac_present() {
+  timeout 3 omarchy-power-present >/dev/null 2>&1
+}
+
+battery_percent() {
+  local supply value
+
+  for supply in "$power_supply_path"/BAT*; do
+    [[ -r $supply/capacity ]] || continue
+    value=$(<"$supply/capacity")
+    [[ $value =~ ^[0-9]+$ ]] || continue
+    printf '%s\n' "$value"
+    return 0
+  done
+  return 1
+}
+
+battery_status() {
+  local supply value
+
+  for supply in "$power_supply_path"/BAT*; do
+    [[ -r $supply/status ]] || continue
+    value=$(<"$supply/status")
+    [[ -n $value ]] || continue
+    printf '%s\n' "$value"
+    return 0
+  done
+  return 1
+}
+
+temperature_c() {
+  local zone value max=0
+
+  for zone in "$thermal_path"/thermal_zone*; do
+    [[ -r $zone/temp ]] || continue
+    value=$(<"$zone/temp")
+    [[ $value =~ ^[0-9]+$ ]] || continue
+    value=$((value / 1000))
+    (( value > max )) && max=$value
+  done
+
+  (( max > 0 )) || return 1
+  printf '%s\n' "$max"
 }
 
 is_laptop() {
@@ -261,8 +309,25 @@ restore_panel() {
 }
 
 announce_on() {
-  local suffix=""
+  local suffix="" battery temperature
   [[ -n $deadline_label ]] && suffix=" until $deadline_label"
+
+  if command -v omarchy-power-present >/dev/null 2>&1 && ! ac_present; then
+    echo "warning: no AC power; a closed laptop will drain its battery." >&2
+    if [[ -z $deadline_epoch ]]; then
+      echo "         Use 'homelab on --for 2h' to make the hold expire." >&2
+    fi
+  fi
+
+  battery=$(battery_percent || true)
+  if [[ $battery =~ ^[0-9]+$ ]] && (( 10#$battery <= 20 )); then
+    echo "warning: battery is at ${battery}%; a closed laptop will drain it." >&2
+  fi
+
+  temperature=$(temperature_c || true)
+  if [[ $temperature =~ ^[0-9]+$ ]] && (( 10#$temperature >= 90 )); then
+    echo "warning: CPU temperature is ${temperature}C; check ventilation." >&2
+  fi
 
   if lid_closed; then
     echo "HomeLab mode on${suffix}. The lid is closed: keeping the machine running."
@@ -444,6 +509,10 @@ collect_state() {
   state_dpms="unknown"
   state_linger="unknown"
   state_blanked_monitor=""
+  state_ac="unknown"
+  state_battery=""
+  state_battery_status=""
+  state_temp=""
   state_deadline_epoch=""
   state_deadline_label=""
   state_deadline_remaining=0
@@ -464,6 +533,13 @@ collect_state() {
   if command -v omarchy-hw-laptop-closed >/dev/null 2>&1; then
     if lid_closed; then state_lid="closed"; else state_lid="open"; fi
   fi
+
+  if command -v omarchy-power-present >/dev/null 2>&1; then
+    if ac_present; then state_ac="yes"; else state_ac="no"; fi
+  fi
+  state_battery=$(battery_percent || true)
+  state_battery_status=$(battery_status || true)
+  state_temp=$(temperature_c || true)
 
   if (( state_inhibited )) && inhibitor_held; then
     state_lock_held=1
@@ -555,6 +631,17 @@ collect_state() {
   if (( state_deadline_active )) && [[ -z $state_deadline_epoch ]]; then
     state_warnings+=("the deadline service is active without a deadline file")
   fi
+  if (( state_flag )) && [[ $state_ac == no ]]; then
+    if [[ $state_battery =~ ^[0-9]+$ ]] && (( 10#$state_battery <= 20 )); then
+      state_warnings+=("on battery at ${state_battery}%; HomeLab mode will drain it")
+    fi
+    if [[ -z $state_deadline_epoch ]]; then
+      state_warnings+=("on battery without a deadline; prefer homelab on --for")
+    fi
+  fi
+  if [[ $state_temp =~ ^[0-9]+$ ]] && (( 10#$state_temp >= 90 )); then
+    state_warnings+=("CPU temperature is ${state_temp}C; check ventilation")
+  fi
 
   if (( state_flag )) && ! (( state_lid_enabled )); then
     state_warnings+=("the lid watcher unit is not enabled for graphical sessions")
@@ -577,7 +664,7 @@ collect_state() {
 }
 
 status_human() {
-  local problem warning
+  local problem warning power
 
   printf 'Mode:             %s\n' "$([[ $state_mode == homelab ]] && echo HomeLab || echo Laptop)"
   printf 'Lid:              %s\n' "$state_lid"
@@ -601,6 +688,16 @@ status_human() {
     printf 'Internal display: %s (%s, DPMS %s)\n' \
       "$state_internal" "$state_internal_state" "$state_dpms"
   fi
+
+  case "$state_ac" in
+    yes) power="AC" ;;
+    no) power="battery" ;;
+    *) power="power unknown" ;;
+  esac
+  [[ -n $state_battery ]] && power+=", ${state_battery}%"
+  [[ -n $state_battery_status ]] && power+=", ${state_battery_status}"
+  [[ -n $state_temp ]] && power+=", ${state_temp}C"
+  printf 'Power:            %s\n' "$power"
 
   case "$state_boot" in
     homelab-persistent) printf 'At boot:          HomeLab (persistent, linger: yes)\n' ;;
@@ -663,6 +760,10 @@ status_json() {
     --arg deadlineLabel "$state_deadline_label" \
     --argjson deadlineRemaining "$state_deadline_remaining" \
     --argjson deadlineActive "$state_deadline_active" \
+    --arg ac "$state_ac" \
+    --arg battery "$state_battery" \
+    --arg batteryStatus "$state_battery_status" \
+    --arg temperature "$state_temp" \
     --argjson problems "$problems" \
     --argjson warnings "$warnings" \
     '{
@@ -697,6 +798,12 @@ status_json() {
         remainingSeconds: $deadlineRemaining,
         active: ($deadlineActive == 1)
       } end),
+      power: {
+        ac: (if $ac == "yes" then true elif $ac == "no" then false else null end),
+        batteryPercent: (if ($battery | test("^[0-9]+$")) then ($battery | tonumber) else null end),
+        batteryStatus: (if $batteryStatus == "" then null else $batteryStatus end),
+        temperatureC: (if ($temperature | test("^[0-9]+$")) then ($temperature | tonumber) else null end)
+      },
       problems: $problems,
       warnings: $warnings,
       consistent: (($problems | length) == 0)

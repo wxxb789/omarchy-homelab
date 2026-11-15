@@ -50,6 +50,8 @@ new_sandbox() {
   export XDG_CONFIG_HOME="$test_tmp/config"
   export XDG_RUNTIME_DIR="$test_tmp/run"
   export OMARCHY_ACPI_LID_PATH="$FAKE_STATE/acpi-lid"
+  export HOMELAB_POWER_SUPPLY_PATH="$FAKE_STATE/power"
+  export HOMELAB_THERMAL_PATH="$FAKE_STATE/thermal"
   export PATH="$test_tmp/bin:$PATH"
 
   # Deterministic defaults for the knobs the fakes understand.
@@ -57,15 +59,20 @@ new_sandbox() {
   export FAKE_LINGER=yes
   export FAKE_LOCK=present
   export FAKE_MAINPID=4242
+  export FAKE_AC=yes
   export FAKE_MONITOR=${FAKE_MONITOR:-eDP-1}
   unset FAKE_DPMS_ON FAKE_DPMS_OFF FAKE_HYPR
 
   unset HYPRLAND_INSTANCE_SIGNATURE WAYLAND_DISPLAY
 
   mkdir -p "$HOME" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" \
-    "$FAKE_STATE" "$FAKE_LOG_DIR" "$test_tmp/bin"
+    "$FAKE_STATE" "$FAKE_LOG_DIR" "$test_tmp/bin" \
+    "$FAKE_STATE/power/BAT0" "$FAKE_STATE/thermal/thermal_zone0"
 
   printf '%s\n' "$FAKE_MONITOR" >"$FAKE_STATE/internal-monitor"
+  printf '80\n' >"$FAKE_STATE/power/BAT0/capacity"
+  printf 'Discharging\n' >"$FAKE_STATE/power/BAT0/status"
+  printf '50000\n' >"$FAKE_STATE/thermal/thermal_zone0/temp"
   reset_fake_monitors
   set_lid open
 
@@ -392,6 +399,13 @@ printf 'notify-send %s\n' "$*" >>"$FAKE_LOG_DIR/notify-send.log"
 exit 0
 EOF
 
+  write_fake omarchy-power-present <<'EOF'
+#!/bin/bash
+set -euo pipefail
+printf 'omarchy-power-present\n' >>"$FAKE_LOG_DIR/power.log"
+[[ ${FAKE_AC:-yes} == yes ]]
+EOF
+
   write_fake omarchy-hw-laptop <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -430,6 +444,23 @@ set -euo pipefail
 printf 'tick\n' >>"$FAKE_LOG_DIR/ticks.log"
 "$REAL_SLEEP" "${FAKE_SLEEP_SECONDS:-0.05}"
 EOF
+}
+
+set_ac() {
+  export FAKE_AC=$1
+}
+
+set_battery() {
+  local percent=$1 status=${2:-Discharging}
+
+  printf '%s\n' "$percent" >"$FAKE_STATE/power/BAT0/capacity"
+  printf '%s\n' "$status" >"$FAKE_STATE/power/BAT0/status"
+}
+
+set_temperature() {
+  local celsius=$1
+
+  printf '%s\n' "$((celsius * 1000))" >"$FAKE_STATE/thermal/thermal_zone0/temp"
 }
 
 set_lid() {
