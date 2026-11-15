@@ -264,96 +264,273 @@ cmd_toggle() {
   fi
 }
 
-status() {
-  local flag=0 inhibited=0 watcher=0 enabled=0 lid_enabled=0 blanked=0 issues=0 linger
-  local internal state blanked_monitor user_name
+json_array() {
+  if (( $# == 0 )); then
+    printf '[]\n'
+    return 0
+  fi
+  printf '%s\n' "$@" | jq -R . | jq -s .
+}
 
-  [[ -f $mode_flag ]] && flag=1
-  sc is-active --quiet "$inhibit_unit" && inhibited=1
-  sc is-active --quiet "$lid_unit" && watcher=1
-  sc is-enabled --quiet "$inhibit_unit" 2>/dev/null && enabled=1
-  sc is-enabled --quiet "$lid_unit" 2>/dev/null && lid_enabled=1
-  [[ -f $blanked_flag ]] && blanked=1
+collect_state() {
+  local monitors="" user_name
 
-  printf 'Mode:             %s\n' "$(mode_name)"
+  state_flag=0
+  state_inhibited=0
+  state_lock_held=0
+  state_watcher=0
+  state_enabled=0
+  state_lid_enabled=0
+  state_blanked=0
+  state_hypr=0
+  state_lid="unknown"
+  state_internal=""
+  state_internal_state="unknown"
+  state_dpms="unknown"
+  state_linger="unknown"
+  state_blanked_monitor=""
+  state_mode="laptop"
+  state_boot="laptop"
+  state_problems=()
+  state_warnings=()
 
-  if ! command -v omarchy-hw-laptop-closed >/dev/null 2>&1; then
-    printf 'Lid:              unknown (omarchy-hw-laptop-closed missing)\n'
-  elif lid_closed; then
-    printf 'Lid:              closed\n'
-  else
-    printf 'Lid:              open\n'
+  [[ -f $mode_flag ]] && state_flag=1
+  sc is-active --quiet "$inhibit_unit" && state_inhibited=1
+  sc is-active --quiet "$lid_unit" && state_watcher=1
+  sc is-enabled --quiet "$inhibit_unit" 2>/dev/null && state_enabled=1
+  sc is-enabled --quiet "$lid_unit" 2>/dev/null && state_lid_enabled=1
+  [[ -f $blanked_flag ]] && state_blanked=1
+  (( state_flag )) && state_mode="homelab"
+
+  if command -v omarchy-hw-laptop-closed >/dev/null 2>&1; then
+    if lid_closed; then state_lid="closed"; else state_lid="open"; fi
   fi
 
-  if (( inhibited )); then
-    printf 'Lid suspend:      inhibited (machine keeps running)\n'
+  if (( state_inhibited )) && inhibitor_held; then
+    state_lock_held=1
+  fi
+
+  state_internal=$(timeout 3 omarchy-hyprland-monitor-laptop 2>/dev/null || true)
+  valid_monitor "$state_internal" || state_internal=""
+
+  if [[ -n $state_internal ]]; then
+    monitors=$(hypr monitors all -j 2>/dev/null || true)
+    if [[ -n $monitors ]] && jq -e . <<<"$monitors" >/dev/null 2>&1; then
+      state_hypr=1
+      state_internal_state=$(jq -r --arg m "$state_internal" \
+        '.[] | select(.name == $m) | if .disabled then "disabled" else "enabled" end' \
+        <<<"$monitors" | head -n 1)
+      state_dpms=$(jq -r --arg m "$state_internal" \
+        '.[] | select(.name == $m) | .dpmsStatus' <<<"$monitors" | head -n 1)
+      [[ -n $state_internal_state && $state_internal_state != null ]] || state_internal_state="unknown"
+      [[ -n $state_dpms && $state_dpms != null ]] || state_dpms="unknown"
+    elif [[ -n $state_internal ]]; then
+      state_warnings+=("could not query Hyprland monitor state")
+    fi
+  fi
+
+  if [[ -r $blanked_flag ]]; then
+    state_blanked_monitor=$(<"$blanked_flag")
+    valid_monitor "$state_blanked_monitor" || state_blanked_monitor=""
+  fi
+
+  user_name=$(id -un)
+  state_linger=$(timeout 5 loginctl show-user "$user_name" -p Linger --value 2>/dev/null || true)
+  [[ -n $state_linger ]] || state_linger="unknown"
+
+  if (( state_flag )); then
+    if (( state_enabled )); then
+      if [[ $state_linger == yes ]]; then
+        state_boot="homelab-persistent"
+      else
+        state_boot="homelab-after-login"
+      fi
+    else
+      state_boot="homelab-not-enabled"
+    fi
+  fi
+
+  if (( state_flag )) && ! (( state_inhibited )); then
+    state_problems+=("mode flag is set but the lid inhibitor is not active")
+  fi
+  if (( state_flag )) && (( state_inhibited )) && ! (( state_lock_held )); then
+    state_problems+=("the inhibitor unit is active but no handle-lid-switch lock is held")
+  fi
+  if ! (( state_flag )) && (( state_inhibited )); then
+    state_problems+=("the lid inhibitor is active but the mode flag is absent")
+  fi
+  if (( state_flag )) && ! (( state_watcher )); then
+    if (( state_hypr )); then
+      state_problems+=("the lid watcher is not running; the panel may stay on")
+    else
+      state_warnings+=("the lid watcher is inactive because Hyprland is not reachable")
+    fi
+  fi
+  if ! (( state_flag )) && (( state_watcher )); then
+    state_problems+=("the lid watcher is active without HomeLab mode")
+  fi
+  if (( state_blanked )) && ! (( state_flag )); then
+    state_problems+=("the panel is blanked without HomeLab mode")
+  fi
+  if (( state_flag )) && (( state_blanked )) && [[ $state_lid == open ]] && [[ $state_dpms == false ]]; then
+    state_problems+=("the panel is blanked while the lid is open")
+  fi
+
+  if (( state_flag )) && ! (( state_lid_enabled )); then
+    state_warnings+=("the lid watcher unit is not enabled for graphical sessions")
+  fi
+  if (( state_flag )) && [[ $state_linger != yes ]]; then
+    state_warnings+=("boot persistence is off (linger: $state_linger)")
+  fi
+  if (( state_flag )) && [[ $state_lid == closed ]] && ! (( state_blanked )); then
+    state_warnings+=("the lid is closed but the panel has not blanked yet")
+  fi
+  if (( state_flag )) && (( state_blanked )) && [[ $state_dpms == true ]]; then
+    state_warnings+=("a blank marker exists but the panel is already on")
+  fi
+  if [[ -z $state_internal ]]; then
+    state_warnings+=("internal output not detected")
+  fi
+  if [[ -n $state_blanked_monitor && -n $state_internal && $state_blanked_monitor != "$state_internal" ]]; then
+    state_warnings+=("the blank marker names $state_blanked_monitor, but the internal output is $state_internal")
+  fi
+}
+
+status_human() {
+  local problem warning
+
+  printf 'Mode:             %s\n' "$([[ $state_mode == homelab ]] && echo HomeLab || echo Laptop)"
+  printf 'Lid:              %s\n' "$state_lid"
+  if (( state_inhibited )); then
+    if (( state_lock_held )); then
+      printf 'Lid suspend:      inhibited (lock verified)\n'
+    else
+      printf 'Lid suspend:      inhibited (lock NOT verified)\n'
+    fi
   else
     printf 'Lid suspend:      enabled (logind suspends)\n'
   fi
-
-  if (( watcher )); then
+  if (( state_watcher )); then
     printf 'Lid watcher:      active\n'
   else
     printf 'Lid watcher:      inactive\n'
   fi
-
-  internal=$(timeout 3 omarchy-hyprland-monitor-laptop 2>/dev/null || true)
-  valid_monitor "$internal" || internal=""
-  if [[ -z $internal ]]; then
+  if [[ -z $state_internal ]]; then
     printf 'Internal display: not detected\n'
   else
-    state=$(hypr monitors all -j 2>/dev/null |
-      jq -r --arg m "$internal" '.[] | select(.name == $m) |
-        if .disabled then "disabled" else "enabled" end' |
-      head -n 1)
-    printf 'Internal display: %s (%s)\n' "$internal" "${state:-unknown}"
+    printf 'Internal display: %s (%s, DPMS %s)\n' \
+      "$state_internal" "$state_internal_state" "$state_dpms"
   fi
 
-  user_name=$(id -un)
-  linger=$(timeout 5 loginctl show-user "$user_name" -p Linger --value 2>/dev/null || echo unknown)
-  [[ -n $linger ]] || linger=unknown
+  case "$state_boot" in
+    homelab-persistent) printf 'At boot:          HomeLab (persistent, linger: yes)\n' ;;
+    homelab-after-login) printf 'At boot:          HomeLab after login (linger: %s)\n' "$state_linger" ;;
+    homelab-not-enabled) printf 'At boot:          HomeLab flag set, but the unit is not enabled\n' ;;
+    *) printf 'At boot:          Laptop (default)\n' ;;
+  esac
 
-  if (( flag )) && (( enabled )); then
-    if [[ $linger == yes ]]; then
-      printf 'At boot:          HomeLab (persistent, linger: yes)\n'
+  if (( state_blanked )); then
+    if [[ -n $state_blanked_monitor ]]; then
+      printf 'Panel blanked:    yes (%s)\n' "$state_blanked_monitor"
     else
-      printf 'At boot:          HomeLab after login (linger: %s)\n' "$linger"
+      printf 'Panel blanked:    yes\n'
     fi
-  elif (( flag )); then
-    printf 'At boot:          HomeLab flag set, but the unit is not enabled\n'
+  fi
+
+  if (( ${#state_problems[@]} == 0 )); then
+    printf 'State:            consistent\n'
   else
-    printf 'At boot:          Laptop (default)\n'
+    printf 'State:            INCONSISTENT\n'
+  fi
+  for problem in "${state_problems[@]}"; do
+    printf '! %s\n' "$problem"
+  done
+  for warning in "${state_warnings[@]}"; do
+    printf '~ %s\n' "$warning"
+  done
+}
+
+status_json() {
+  local problems warnings
+  problems=$(json_array "${state_problems[@]}")
+  warnings=$(json_array "${state_warnings[@]}")
+
+  jq -n \
+    --argjson schemaVersion 1 \
+    --arg mode "$state_mode" \
+    --arg lid "$state_lid" \
+    --argjson inhibited "$state_inhibited" \
+    --argjson lockHeld "$state_lock_held" \
+    --argjson watcher "$state_watcher" \
+    --argjson watcherEnabled "$state_lid_enabled" \
+    --argjson inhibitorEnabled "$state_enabled" \
+    --arg linger "$state_linger" \
+    --arg boot "$state_boot" \
+    --arg internal "$state_internal" \
+    --arg display "$state_internal_state" \
+    --arg dpms "$state_dpms" \
+    --argjson blanked "$state_blanked" \
+    --argjson hyprland "$state_hypr" \
+    --arg blankedMonitor "$state_blanked_monitor" \
+    --argjson problems "$problems" \
+    --argjson warnings "$warnings" \
+    '{
+      schemaVersion: $schemaVersion,
+      mode: $mode,
+      lid: $lid,
+      inhibitor: {
+        active: ($inhibited == 1),
+        lockHeld: ($lockHeld == 1)
+      },
+      hyprland: ($hyprland == 1),
+      watcher: {
+        active: ($watcher == 1),
+        enabled: ($watcherEnabled == 1),
+        required: ($hyprland == 1)
+      },
+      boot: {
+        mode: $boot,
+        linger: $linger,
+        inhibitorEnabled: ($inhibitorEnabled == 1)
+      },
+      panel: {
+        monitor: (if $internal == "" then null else $internal end),
+        display: $display,
+        dpmsOn: (if $dpms == "true" then true elif $dpms == "false" then false else null end),
+        blanked: ($blanked == 1),
+        blankedMonitor: (if $blankedMonitor == "" then null else $blankedMonitor end)
+      },
+      problems: $problems,
+      warnings: $warnings,
+      consistent: (($problems | length) == 0)
+    }'
+}
+
+cmd_status() {
+  local json=0 strict=0 arg
+
+  for arg in "$@"; do
+    case $arg in
+      --json) json=1 ;;
+      --strict) strict=1 ;;
+      *)
+        echo "homelab: unknown status option: $arg" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  collect_state
+  if (( json )); then
+    status_json
+  else
+    status_human
   fi
 
-  if (( blanked )); then
-    blanked_monitor=""
-    [[ -r $blanked_flag ]] && blanked_monitor=$(<"$blanked_flag")
-    if valid_monitor "$blanked_monitor"; then
-      printf 'Panel blanked:    yes (%s; restored when the lid opens)\n' "$blanked_monitor"
-    else
-      printf 'Panel blanked:    yes (restored when the lid opens)\n'
-    fi
+  if (( strict )) && (( ${#state_problems[@]} > 0 )); then
+    return 1
   fi
-
-  if (( flag )) && ! (( inhibited )); then
-    printf 'Health:           inconsistent: mode flag set, inhibitor inactive\n' >&2
-    issues=1
-  elif ! (( flag )) && (( inhibited )); then
-    printf 'Health:           inconsistent: inhibitor active, mode flag absent\n' >&2
-    issues=1
-  fi
-
-  if (( flag )) && ! (( watcher )); then
-    printf 'Health:           warning: lid watcher inactive; the panel may stay on\n' >&2
-  fi
-  if (( flag )) && ! (( lid_enabled )); then
-    printf 'Health:           warning: lid watcher unit is not enabled for graphical sessions\n' >&2
-  fi
-  if (( blanked )) && ! (( flag )); then
-    printf 'Health:           warning: panel blanked without HomeLab mode\n' >&2
-  fi
-
-  return "$issues"
+  return 0
 }
 
 case "${1:-status}" in
@@ -367,7 +544,8 @@ case "${1:-status}" in
     cmd_toggle
     ;;
   status)
-    status
+    shift
+    cmd_status "$@"
     ;;
   -h|--help|help)
     cat <<'EOF'
@@ -377,6 +555,8 @@ Usage: homelab [on|off|toggle|status]
   off, laptop   Laptop mode: suspend on lid close
   toggle        Switch between the two modes
   status        Show the current mode and lid/display state
+  status --json Machine-readable state for scripts and the bar
+  status --strict Exit 1 if the mode is inconsistent
 EOF
     ;;
   *)
@@ -387,6 +567,8 @@ Usage: homelab [on|off|toggle|status]
   off, laptop   Laptop mode: suspend on lid close
   toggle        Switch between the two modes
   status        Show the current mode and lid/display state
+  status --json Machine-readable state for scripts and the bar
+  status --strict Exit 1 if the mode is inconsistent
 EOF
     exit 1
     ;;
