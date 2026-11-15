@@ -67,7 +67,7 @@ assert_line "$status" '^Lid watcher:[[:space:]]+active$' \
   "status reports the active lid watcher"
 assert_line "$status" '^At boot:[[:space:]]+HomeLab \(persistent, linger: yes\)$' \
   "status reports boot persistence and lingering"
-assert_line "$status" '^Internal display:[[:space:]]+eDP-1 \(enabled\)$' \
+assert_line "$status" '^Internal display:[[:space:]]+eDP-1 \(enabled, DPMS (true|false)\)$' \
   "status reports the internal display state"
 
 # Disable must stop the watcher first so its ExecStopPost can restore DPMS
@@ -153,26 +153,37 @@ rm -f "$FAKE_STATE/fail-start-homelab-lid.service"
 "$homelab" off >/dev/null 2>&1
 assert_no_file "$flag" "homelab off cleans up after a watcher failure"
 
-# Status is a health check: flag set with no inhibitor is an error.
+# Status is a health check: flag set with no inhibitor is an error only in strict mode.
 : >"$flag"
-if out=$("$homelab" status 2>&1); then
-  fail "status should exit 1 when the mode flag is set and the inhibitor is inactive"
-fi
+out=$("$homelab" status 2>&1)
+assert_line "$out" '^State:[[:space:]]+INCONSISTENT$' \
+  "status reports an inconsistent state"
 assert_line "$out" \
-  '^Health:[[:space:]]+inconsistent: mode flag set, inhibitor inactive$' \
+  '^! mode flag is set but the lid inhibitor is not active$' \
   "status reports a flag without an inhibitor"
 assert_line "$out" '^Lid watcher:[[:space:]]+inactive$' \
   "status reports the missing watcher in the inconsistent state"
+if out=$("$homelab" status --strict 2>&1); then
+  fail "status --strict should exit 1 when the mode flag is set and the inhibitor is inactive"
+fi
+
+# JSON exposes the same problem without prose parsing.
+json=$("$homelab" status --json)
+jq -e '.schemaVersion == 1 and .consistent == false and (.problems | length) >= 1' <<<"$json" >/dev/null ||
+  fail "status --json should expose the inconsistency"
 rm -f "$flag"
 
 # The same health check catches the opposite mismatch.
 systemctl --user start homelab-inhibit.service
-if out=$("$homelab" status 2>&1); then
-  fail "status should exit 1 when the inhibitor is active without the mode flag"
-fi
+out=$("$homelab" status 2>&1)
+assert_line "$out" '^State:[[:space:]]+INCONSISTENT$' \
+  "status reports the opposite inconsistency"
 assert_line "$out" \
-  '^Health:[[:space:]]+inconsistent: inhibitor active, mode flag absent$' \
+  '^! the lid inhibitor is active but the mode flag is absent$' \
   "status reports an inhibitor without a mode flag"
+if out=$("$homelab" status --strict 2>&1); then
+  fail "status --strict should exit 1 when the inhibitor is active without the mode flag"
+fi
 systemctl --user stop homelab-inhibit.service
 
 # Only enabling HomeLab mode needs laptop hardware. Turning it off must keep
