@@ -36,10 +36,16 @@ homelab on        # HomeLab mode: keep running when the lid closes
 homelab off       # Laptop mode: suspend on lid close
 homelab toggle    # Switch modes
 homelab status    # Show mode, lid state, inhibitor, display, boot persistence
+homelab status --json --strict  # machine-readable, fail on inconsistency
 ```
 
 `homelab on` also accepts `homelab` and `server` as the mode name; `homelab off`
 also accepts `laptop`.
+
+`homelab status --json` prints a machine-readable snapshot (`schemaVersion: 1`)
+with the mode, lid, verified inhibitor lock, watcher, boot state, panel state,
+problems, and warnings. Add `--strict` to exit 1 when the mode is inconsistent;
+plain `status` stays useful to humans and exits 0.
 
 ## Bar icon
 
