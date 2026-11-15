@@ -133,7 +133,7 @@ duration_seconds() {
 
   [[ $value =~ ^([0-9]+[smhd])+$ ]] || return 1
   while [[ $value =~ ^([0-9]+)([smhd])(.*)$ ]]; do
-    number=${BASH_REMATCH[1]}
+    number=$((10#${BASH_REMATCH[1]}))
     unit=${BASH_REMATCH[2]}
     value=${BASH_REMATCH[3]}
     case $unit in
@@ -632,6 +632,14 @@ collect_state() {
   fi
   if (( state_deadline_active )) && [[ -z $state_deadline_epoch ]]; then
     state_warnings+=("the deadline service is active without a deadline file")
+  fi
+  if ! (( state_flag )); then
+    if [[ -n $state_deadline_epoch ]]; then
+      state_warnings+=("a deadline is set while HomeLab mode is off")
+    fi
+    if (( state_deadline_active )); then
+      state_warnings+=("the deadline service is active while HomeLab mode is off")
+    fi
   fi
   if (( state_flag )) && [[ $state_ac == no ]]; then
     if [[ $state_battery =~ ^[0-9]+$ ]] && (( 10#$state_battery <= 20 )); then

@@ -166,6 +166,34 @@ power-off action. A held `handle-lid-switch` blocker should prevent logind from
 acting on the switch, but it cannot stop a manual suspend or a firmware power
 event.
 
+## Timed hold does not fire
+
+Confirm the deadline and the service that enforces it:
+
+```bash
+homelab status
+systemctl --user status homelab-deadline.service --no-pager
+journalctl --user -u homelab-deadline -n 50 --no-pager
+```
+
+The status line should show `Deadline: ... (N left)`. The deadline service
+should be `active (running)` while a future deadline exists. If it is inactive
+or failed:
+
+```bash
+systemctl --user reset-failed homelab-deadline.service
+homelab on --for 2h     # rewrites the deadline and restarts the service
+```
+
+The service is enabled at boot. A timed hold survives a reboot only when
+systemd lingering is enabled; without lingering it starts after login. If
+`homelab status` says `boot persistence is off`, run `./install.sh` again as
+the desktop user.
+
+If the mode was turned off by hand (the flag file was removed) while the
+deadline service was still sleeping, `homelab status` reports a stale
+deadline. Run `homelab off` to clear it.
+
 ## Panel stays lit or blanked
 
 Check the watcher and the actual monitor state:

@@ -40,16 +40,17 @@ lid_closed() {
 # boot (via linger) has no HYPRLAND_INSTANCE_SIGNATURE in its environment, and
 # the signature changes whenever Hyprland restarts, so resolve it each time.
 hypr() {
-  local sig
+  local sig timeout=2
+  [[ ${1:-} == dispatch ]] && timeout=10
 
   if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] &&
-    HYPRLAND_INSTANCE_SIGNATURE=$HYPRLAND_INSTANCE_SIGNATURE timeout 2 hyprctl "$@" 2>/dev/null; then
+    HYPRLAND_INSTANCE_SIGNATURE=$HYPRLAND_INSTANCE_SIGNATURE timeout "$timeout" hyprctl "$@" 2>/dev/null; then
     return 0
   fi
 
   for sig in "${XDG_RUNTIME_DIR:-/run/user/$UID}"/hypr/*; do
     [[ -S $sig/.socket.sock ]] || continue
-    HYPRLAND_INSTANCE_SIGNATURE=${sig##*/} timeout 2 hyprctl "$@" 2>/dev/null && return 0
+    HYPRLAND_INSTANCE_SIGNATURE=${sig##*/} timeout "$timeout" hyprctl "$@" 2>/dev/null && return 0
   done
 
   return 1

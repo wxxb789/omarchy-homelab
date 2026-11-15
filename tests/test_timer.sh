@@ -55,6 +55,24 @@ if "$homelab" on --for 1h --until 23:00 >/dev/null 2>&1; then
 fi
 assert_no_file "$flag" "an invalid deadline leaves no mode flag"
 
+# Leading-zero durations are decimal, not octal.
+"$homelab" on --for 08m >/dev/null
+assert_file "$deadline" "a leading-zero duration writes a deadline"
+"$homelab" off >/dev/null
+
+# A stale deadline without the mode flag is reported.
+mkdir -p "$state_dir"
+printf '%s\n' "$(( $(date +%s) + 600 ))" >"$deadline"
+systemctl --user start homelab-deadline.service
+json=$("$homelab" status --json)
+jq -e '
+  (.warnings | index("a deadline is set while HomeLab mode is off"))
+  and (.warnings | index("the deadline service is active while HomeLab mode is off"))
+' <<<"$json" >/dev/null || fail "status should flag a deadline while the mode is off"
+ok "status flags a stale deadline while the mode is off"
+systemctl --user stop homelab-deadline.service
+rm -f "$deadline"
+
 # --until accepts a future wall-clock time.
 until_time=$(date -d '+1 minute' +%H:%M)
 "$homelab" on --until "$until_time" >/dev/null
