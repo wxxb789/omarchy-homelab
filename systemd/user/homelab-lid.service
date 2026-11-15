@@ -10,11 +10,30 @@ StartLimitBurst=3
 [Service]
 Type=simple
 SyslogIdentifier=homelab-lid
+StateDirectory=homelab
+StateDirectoryMode=0700
+UMask=0077
 ExecStart=%h/.local/bin/homelab-lid-watch
 ExecStopPost=-%h/.local/bin/homelab-lid-watch --restore
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%S/homelab
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX
 
 [Install]
 WantedBy=graphical-session.target
