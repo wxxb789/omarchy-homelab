@@ -386,8 +386,11 @@ enable_homelab() {
     echo "         The machine will keep running; the internal panel may stay on." >&2
   fi
 
-  if ! sc enable "$inhibit_unit" "$lid_unit" "$deadline_unit" >/dev/null 2>&1; then
+  if ! sc enable "$inhibit_unit" "$lid_unit" "$deadline_unit" homelab-guard.timer >/dev/null 2>&1; then
     echo "warning: could not enable the units for boot; this mode will not survive a reboot." >&2
+  fi
+  if ! sc start homelab-guard.timer >/dev/null 2>&1; then
+    echo "warning: could not start the safety guard timer." >&2
   fi
 
   return 0
@@ -399,6 +402,7 @@ disable_homelab() {
 
   clear_deadline_file
   stop_deadline_service
+  sc stop homelab-guard.timer >/dev/null 2>&1 || true
   rm -f "$mode_flag"
 
   # Stop the watcher first. Its ExecStopPost restores DPMS while Hyprland is
@@ -518,6 +522,8 @@ collect_state() {
   state_deadline_remaining=0
   state_deadline_active=0
   state_deadline_enabled=0
+  state_guard_active=0
+  state_guard_enabled=0
   state_mode="laptop"
   state_boot="laptop"
   state_problems=()
@@ -576,6 +582,8 @@ collect_state() {
   fi
   sc is-active --quiet "$deadline_unit" && state_deadline_active=1
   sc is-enabled --quiet "$deadline_unit" 2>/dev/null && state_deadline_enabled=1
+  sc is-active --quiet homelab-guard.timer && state_guard_active=1
+  sc is-enabled --quiet homelab-guard.timer 2>/dev/null && state_guard_enabled=1
   if [[ -n $state_deadline_epoch ]]; then
     now=$(date +%s)
     state_deadline_remaining=$((state_deadline_epoch - now))
@@ -632,6 +640,12 @@ collect_state() {
   fi
   if (( state_deadline_active )) && [[ -z $state_deadline_epoch ]]; then
     state_warnings+=("the deadline service is active without a deadline file")
+  fi
+  if (( state_flag )) && ! (( state_guard_active )); then
+    state_warnings+=("the safety guard timer is inactive")
+  fi
+  if (( state_flag )) && ! (( state_guard_enabled )); then
+    state_warnings+=("the safety guard timer is not enabled")
   fi
   if ! (( state_flag )); then
     if [[ -n $state_deadline_epoch ]]; then
@@ -731,6 +745,12 @@ status_human() {
     printf 'Deadline:         none\n'
   fi
 
+  if (( state_guard_active )); then
+    printf 'Guard:            active (battery <=10%%, temp >=95C)\n'
+  else
+    printf 'Guard:            inactive\n'
+  fi
+
   if (( ${#state_problems[@]} == 0 )); then
     printf 'State:            consistent\n'
   else
@@ -771,6 +791,8 @@ status_json() {
     --argjson deadlineRemaining "$state_deadline_remaining" \
     --argjson deadlineActive "$state_deadline_active" \
     --argjson deadlineEnabled "$state_deadline_enabled" \
+    --argjson guardActive "$state_guard_active" \
+    --argjson guardEnabled "$state_guard_enabled" \
     --arg ac "$state_ac" \
     --arg battery "$state_battery" \
     --arg batteryStatus "$state_battery_status" \
@@ -810,6 +832,12 @@ status_json() {
         active: ($deadlineActive == 1),
         enabled: ($deadlineEnabled == 1)
       } end),
+      guard: {
+        timerActive: ($guardActive == 1),
+        timerEnabled: ($guardEnabled == 1),
+        batteryThreshold: 10,
+        temperatureThreshold: 95
+      },
       power: {
         ac: (if $ac == "yes" then true elif $ac == "no" then false else null end),
         batteryPercent: (if ($battery | test("^[0-9]+$")) then ($battery | tonumber) else null end),
@@ -846,6 +874,44 @@ cmd_status() {
   if (( strict )) && (( ${#state_problems[@]} > 0 )); then
     return 1
   fi
+  return 0
+}
+
+cmd_guard_check() {
+  local ac="unknown" battery="" temperature="" threshold_battery threshold_temperature reason=""
+
+  (( $# == 0 )) || {
+    echo "homelab: guard-check takes no options." >&2
+    return 2
+  }
+
+  [[ -f $mode_flag ]] || return 0
+
+  threshold_battery=${HOMELAB_GUARD_BATTERY_PERCENT:-10}
+  threshold_temperature=${HOMELAB_GUARD_TEMP_C:-95}
+  [[ $threshold_battery =~ ^[0-9]+$ ]] || threshold_battery=10
+  [[ $threshold_temperature =~ ^[0-9]+$ ]] || threshold_temperature=95
+
+  if command -v omarchy-power-present >/dev/null 2>&1; then
+    if ac_present; then ac="yes"; else ac="no"; fi
+  fi
+  battery=$(battery_percent || true)
+  temperature=$(temperature_c || true)
+
+  if [[ $ac == no && $battery =~ ^[0-9]+$ ]] &&
+    (( 10#$battery <= 10#$threshold_battery )); then
+    reason="battery at ${battery}% (threshold ${threshold_battery}%)"
+  elif [[ $temperature =~ ^[0-9]+$ ]] &&
+    (( 10#$temperature >= 10#$threshold_temperature )); then
+    reason="temperature at ${temperature}C (threshold ${threshold_temperature}C)"
+  fi
+
+  [[ -n $reason ]] || return 0
+
+  take_lock
+  echo "homelab-guard: $reason; turning HomeLab mode off." >&2
+  notify "HomeLab guard" "$reason; turning off."
+  disable_homelab || return 1
   return 0
 }
 
@@ -968,6 +1034,18 @@ cmd_doctor() {
   [[ -n $state_temp ]] && power_text+=", ${state_temp}C"
   printf '[ok]   %s\n' "$power_text"
 
+  printf '\n== Safety guard ==\n'
+  if (( state_guard_active )); then
+    printf '[ok]   guard timer active (battery <=10%%, temp >=95C)\n'
+  else
+    printf '[warn] guard timer inactive\n'
+  fi
+  if (( state_guard_enabled )); then
+    printf '[ok]   guard timer enabled at boot\n'
+  else
+    printf '[warn] guard timer not enabled\n'
+  fi
+
   printf '\n== State ==\n'
   if (( ${#state_problems[@]} == 0 )); then
     printf '[ok]   consistent\n'
@@ -1007,6 +1085,10 @@ case "${1:-status}" in
   doctor)
     shift
     cmd_doctor "$@"
+    ;;
+  guard-check)
+    shift
+    cmd_guard_check "$@"
     ;;
   -h|--help|help)
     cat <<'EOF'

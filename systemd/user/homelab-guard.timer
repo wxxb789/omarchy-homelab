@@ -1,0 +1,12 @@
+[Unit]
+Description=HomeLab mode: run the battery and temperature guard
+ConditionPathExists=%S/homelab/enabled
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

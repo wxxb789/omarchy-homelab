@@ -25,9 +25,9 @@ verify:
 	@echo "==> systemd units"
 	@if ! command -v systemd-analyze >/dev/null 2>&1; then \
 		echo "skip: systemd-analyze not installed"; \
-	elif systemd-analyze --user verify systemd/user/*.service; then \
+	elif systemd-analyze --user verify systemd/user/*.service systemd/user/*.timer; then \
 		echo "ok: systemd-analyze --user verify"; \
-	elif systemd-analyze verify systemd/user/*.service; then \
+	elif systemd-analyze verify systemd/user/*.service systemd/user/*.timer; then \
 		echo "ok: systemd-analyze verify (system-wide fallback)"; \
 	else \
 		echo "warning: systemd-analyze could not verify units here; skipping (best effort)"; \
