@@ -86,10 +86,10 @@ shell is running, reload it:
 omarchy restart shell
 ```
 
-The `omarchy-shell io.github.wxxb789.homelab refresh` IPC reloads the mode flag
-only; it does not repeat the CLI probe. If the terminal finds `homelab` but the
-widget does not, the command is coming from another directory in `PATH`;
-rerun `./install.sh` as the same user that owns the desktop session.
+The `omarchy-shell io.github.wxxb789.homelab refresh` IPC reloads the mode flag,
+re-probes the CLI, and refreshes the status tooltip. If the terminal finds
+`homelab` but the widget does not, the command is coming from another directory
+in `PATH`; rerun `./install.sh` as the same user that owns the desktop session.
 
 ## Mode says on but the lid still suspends
 
